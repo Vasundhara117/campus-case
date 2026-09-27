@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { DEPARTMENTS } from '../data'
+import { COUNSELORS, DEPARTMENTS } from '../data'
 import { useCampus } from '../CampusContext.jsx'
 
 export default function Login() {
-  const { session, loginStudent, loginStaff } = useCampus()
+  const { session, loginStudent, loginStaff, counselors } = useCampus()
   const [staffOpen, setStaffOpen] = useState(false)
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState('')
   const [studentOpen, setStudentOpen] = useState(false)
   const [profile, setProfile] = useState({ studentId: '', studentName: '', studentProgramme: '' })
 
@@ -57,18 +58,35 @@ export default function Login() {
         <div className="choice" as="div">
           <p className="kicker">Department staff</p>
           <h2>Enter a cell</h2>
-          <p>Work your queue, assign an owner, and invite another department with need-to-know access.</p>
+          <p>Take cases for your department and coordinate supporting work with need-to-know access.</p>
           <button className="btn teal" type="button" style={{ marginTop: 12 }} onClick={() => setStaffOpen((v) => !v)}>
             {staffOpen ? 'Hide departments' : 'Choose department'}
           </button>
           {staffOpen && (
             <div className="staff-list">
               {DEPARTMENTS.map((d) => (
-                <button key={d.id} type="button" onClick={() => loginStaff(d.id)}>
+                <button key={d.id} type="button" onClick={() => {
+                  if (d.id === 'wellbeing') setSelectedDepartmentId(d.id)
+                  else {
+                    setSelectedDepartmentId('')
+                    loginStaff(d.id)
+                  }
+                }}>
                   <strong>{d.name}</strong>
                   <div className="hint">{d.staffName} · {d.title}</div>
                 </button>
               ))}
+              {selectedDepartmentId === 'wellbeing' && (
+                <div className="staff-list counselor-login-list">
+                  <p className="kicker">Choose counselor</p>
+                  {(counselors || COUNSELORS).filter((counselor) => counselor.department === 'Wellbeing Cell').map((counselor) => (
+                    <button key={counselor.id} type="button" onClick={() => loginStaff('wellbeing', counselor.id)}>
+                      <strong>{counselor.name}</strong>
+                      <div className="hint">{counselor.role} · {counselor.availability.toLowerCase()}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

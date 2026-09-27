@@ -37,9 +37,13 @@ export default function StudentHome() {
               <span className="mono">{c.id}</span>
               <div>
                 <strong>{c.title}</strong>
-                <div className="hint">{c.assignedDepartment}{c.parentCaseReference ? ` · linked to ${c.parentCaseReference}` : ''}</div>
+                <div className="hint">
+                  {c.assignedDepartment === 'Wellbeing Cell' ? 'Wellbeing / Counseling Cell' : c.assignedDepartment}
+                  {c.assignedCounselor ? ` · Counselor: ${c.assignedCounselor.name}` : ''}
+                  {c.parentCaseReference ? ` · linked to ${c.parentCaseReference}` : ''}
+                </div>
               </div>
-              <StatusBadge status={c.status} student />
+              <StatusBadge status={c.status} student counselorAssigned={Boolean(c.assignedCounselor)} />
             </div>
           ))}
         </section>

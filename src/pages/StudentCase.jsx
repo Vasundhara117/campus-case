@@ -21,7 +21,9 @@ export default function StudentCase() {
     )
   }
 
+  const wellbeingCase = caze.assignedDepartment === 'Wellbeing Cell'
   const coordinating = caze.status === 'COORDINATION REQUIRED' || caze.internalTasks.some((task) => task.status === 'open')
+  const supportingDepartments = [...new Set(caze.internalTasks.map((task) => task.to))]
   const publicEvents = caze.timeline.filter((event) => event.visibility !== 'internal')
   const latestUpdate = [...publicEvents].sort((a, b) => new Date(b.at) - new Date(a.at))[0]
   const journey = getJourneyCases(cases, caze)
@@ -30,10 +32,12 @@ export default function StudentCase() {
     <div className="page">
       <p className="kicker"><Link to="/student">Your cases</Link> · {caze.id}</p>
       <h1 className="h1">{caze.title}</h1>
-      <StatusBadge status={caze.status} student />
+      <StatusBadge status={caze.status} student counselorAssigned={Boolean(caze.assignedCounselor)} />
       {coordinating && caze.status !== 'RESOLVED' && (
         <p className="callout" style={{ marginTop: 16 }}>
-          Another university team is helping on this case. You do not need to visit another office.
+          {wellbeingCase
+            ? `Your support team is coordinating with ${supportingDepartments.join(', ') || 'another campus service'}. You do not need to visit another office or repeat your situation.`
+            : 'Another university team is helping on this case. You do not need to visit another office.'}
         </p>
       )}
       <div className="grid grid-2" style={{ marginTop: 20 }}>
@@ -42,11 +46,17 @@ export default function StudentCase() {
           <div className="meta">
             <div className="meta-item"><span>Case ID</span><strong>{caze.id}</strong></div>
             <div className="meta-item"><span>Issue</span><strong>{caze.issueCategory}</strong></div>
-            <div className="meta-item"><span>Assigned department</span><strong>{caze.assignedDepartment}</strong></div>
-            <div className="meta-item"><span>Handled by</span><strong>{caze.owner?.name || 'Not yet taken'}</strong></div>
-            <div className="meta-item"><span>Next action</span><strong>{caze.nextAction}</strong></div>
+            <div className="meta-item"><span>Assigned team</span><strong>{wellbeingCase ? 'Wellbeing / Counseling Cell' : caze.assignedDepartment}</strong></div>
+            {wellbeingCase && <div className="meta-item"><span>Counselor assigned</span><strong>{caze.assignedCounselor?.name || 'Awaiting counselor assignment'}</strong></div>}
+            {wellbeingCase && caze.assignedCounselor && <div className="meta-item"><span>Role</span><strong>{caze.assignedCounselor.role}</strong></div>}
+            <div className="meta-item"><span>Next action</span><strong>{wellbeingCase ? studentNextAction(caze) : caze.nextAction}</strong></div>
             <div className="meta-item"><span>Latest update</span><strong>{latestUpdate ? formatWhen(latestUpdate.at) : 'No updates yet'}</strong></div>
           </div>
+          {wellbeingCase && caze.assignedCounselor && caze.status === 'NEW' && (
+            <p className="callout">
+              Your request has been assigned to {caze.assignedCounselor.name}. You do not need to contact another office.
+            </p>
+          )}
           {journey.length > 1 && (
             <div style={{ marginTop: 18 }}>
               <p className="kicker">Connected university teams</p>
@@ -93,4 +103,20 @@ export default function StudentCase() {
       </div>
     </div>
   )
+}
+
+function studentNextAction(caze) {
+  const { status } = caze
+  if (status === 'NEW') {
+    return caze.assignedCounselor
+      ? 'Your request has been assigned to a counselor. You do not need to contact another office.'
+      : 'Your support request has been received.'
+  }
+  if (status === 'IN PROGRESS') return 'Your wellbeing team has started working on your request.'
+  if (status === 'COORDINATION REQUIRED') {
+    const departments = [...new Set(caze.internalTasks.map((task) => task.to))]
+    return `Your support team is coordinating with ${departments.join(', ') || 'another campus service'}. You do not need to visit another office or repeat your situation.`
+  }
+  if (status === 'UNDER REVIEW') return 'Your support request has been reviewed.'
+  return 'Your support request has been coordinated and your next steps have been shared with you.'
 }

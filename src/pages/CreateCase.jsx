@@ -8,10 +8,10 @@ export default function CreateCase() {
   const { createCase, session } = useCampus()
   const navigate = useNavigate()
   const [form, setForm] = useState({
-    issueCategory: 'Attendance',
-    departments: [CATEGORY_ROUTING.Attendance],
-    title: '',
-    description: '',
+    issueCategory: 'Student Wellbeing',
+    departments: [CATEGORY_ROUTING['Student Wellbeing']],
+    title: 'Academic and attendance support',
+    description: 'I have been struggling to keep up with classes and assignments lately. I have also missed some classes and I am finding it difficult to manage everything. I already contacted the wellbeing team, but I do not know which department I should approach next.',
     helpNeeded: '',
     documents: [],
   })
@@ -73,6 +73,13 @@ export default function CreateCase() {
               ? <>This request was added to <strong>{done.id}</strong> for {done.assignedDepartment}.</>
               : <>It has been routed to <strong>{done.assignedDepartment}</strong>. You will not be asked to carry this between offices.</>}
           </p>
+          {done.assignedDepartment === 'Wellbeing Cell' && (
+            <div className="callout">
+              {done.assignedCounselor
+                ? <>Counselor assigned: <strong>{done.assignedCounselor.name}</strong> · {done.assignedCounselor.role}. Your request has been assigned to a counselor. You do not need to contact another office.</>
+                : 'Your support request is awaiting counselor assignment. The Wellbeing Cell will follow up.'}
+            </div>
+          )}
           {done.parentCaseReference && (
             <p className="callout">Connected to the existing student journey under {done.parentCaseReference}.</p>
           )}
@@ -104,7 +111,11 @@ export default function CreateCase() {
     <div className="page">
       <p className="kicker">New case</p>
       <h1 className="h1">Tell us once</h1>
-      <p className="lede">Choose every department that needs to help. We create connected department cases so you don’t have to carry your story between offices.</p>
+      <p className="lede">
+        {form.issueCategory === 'Student Wellbeing'
+          ? 'Submit one support request to Wellbeing / Counseling. Your counselor will coordinate with other campus teams for you.'
+          : 'Choose every department that needs to help. We create connected department cases so you don’t have to carry your story between offices.'}
+      </p>
       <form className="card form" onSubmit={onSubmit} style={{ maxWidth: 680 }}>
         <label>
           Issue category
@@ -117,9 +128,11 @@ export default function CreateCase() {
               setForm((previous) => ({
                 ...previous,
                 issueCategory,
-                departments: previous.departments.includes(previousDefault)
-                  ? [...new Set(previous.departments.map((department) => department === previousDefault ? nextDefault : department))]
-                  : [...new Set([...previous.departments, nextDefault])],
+                departments: issueCategory === 'Student Wellbeing'
+                  ? [nextDefault]
+                  : previous.departments.includes(previousDefault)
+                    ? [...new Set(previous.departments.map((department) => department === previousDefault ? nextDefault : department))]
+                    : [...new Set([...previous.departments, nextDefault])],
               }))
             }}
           >
@@ -130,12 +143,17 @@ export default function CreateCase() {
         </label>
         <fieldset className="department-choices">
           <legend>Departments that should help</legend>
-          <p className="hint">Select one or more. For example, choose both Attendance Cell and Academic Services.</p>
+          <p className="hint">
+            {form.issueCategory === 'Student Wellbeing'
+              ? 'Wellbeing Cell keeps ownership of your one case and will coordinate with other campus services for you.'
+              : 'Select the departments that need to help. Requests will remain connected as one student journey.'}
+          </p>
           <div className="department-checklist">
             {DEPARTMENTS.map((department) => (
               <label className="department-option" key={department.id}>
                 <input
                   type="checkbox"
+                  disabled={form.issueCategory === 'Student Wellbeing' && department.name !== CATEGORY_ROUTING['Student Wellbeing']}
                   checked={form.departments.includes(department.name)}
                   onChange={(e) => {
                     setForm((previous) => ({
@@ -154,7 +172,7 @@ export default function CreateCase() {
           {form.departments.length === 0 && (
             <span className="form-error" role="status">Choose at least one department to enable submission.</span>
           )}
-          <span className="hint">Each selected department receives a case connected to the same student journey.</span>
+          {form.issueCategory !== 'Student Wellbeing' && <span className="hint">Each selected department receives a connected case in the same student journey.</span>}
         </fieldset>
         <label>
           Issue title

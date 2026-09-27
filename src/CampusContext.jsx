@@ -2,9 +2,12 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import {
   CATEGORY_ROUTING,
   ATTENTION_THRESHOLD_MS,
+  COUNSELORS,
   DEPARTMENTS,
   STORAGE_KEY,
+  buildWellbeingTriage,
   buildFallbackSummary,
+  chooseAvailableCounselor,
   expectedFor,
   getJourneyCases,
   isAttentionRequired,
@@ -30,15 +33,34 @@ function loadNotifications() {
 }
 
 function normalizeWorkflowStatus(caze) {
-  if (caze.status === 'ASSIGNED') return { ...caze, status: 'IN PROGRESS' }
-  if (caze.status === 'INTERNAL COORDINATION') return { ...caze, status: 'COORDINATION REQUIRED' }
-  if (caze.status === 'WAITING FOR STUDENT') return { ...caze, status: 'IN PROGRESS' }
-  if (caze.status === 'ACTION COMPLETED') return { ...caze, status: 'UNDER REVIEW' }
-  return caze
+  const legacyDepartments = {
+    'Wellbeing & Counselling': 'Wellbeing Cell',
+    'Academic Services': 'Academic Support',
+  }
+  let normalized = caze
+  if (caze.status === 'ASSIGNED') normalized = { ...normalized, status: 'IN PROGRESS' }
+  if (caze.status === 'INTERNAL COORDINATION') normalized = { ...normalized, status: 'COORDINATION REQUIRED' }
+  if (caze.status === 'WAITING FOR STUDENT') normalized = { ...normalized, status: 'IN PROGRESS' }
+  if (caze.status === 'ACTION COMPLETED') normalized = { ...normalized, status: 'UNDER REVIEW' }
+  if (legacyDepartments[normalized.assignedDepartment]) {
+    normalized = { ...normalized, assignedDepartment: legacyDepartments[normalized.assignedDepartment] }
+  }
+  if (legacyDepartments[normalized.department]) {
+    normalized = { ...normalized, department: legacyDepartments[normalized.department] }
+  }
+  return normalized
 }
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+function isAssignedOwner(caze, session) {
+  if (!caze || !session || caze.assignedDepartment !== session.department) return false
+  if (caze.assignedDepartment === 'Wellbeing Cell') {
+    return caze.assignedCounselor?.id === session.staffId
+  }
+  return true
 }
 
 function event(partial) {
@@ -57,6 +79,12 @@ function loadState() {
     const cases = Array.isArray(parsed.cases) ? parsed.cases : []
     return {
       revision: parsed.revision || { time: 0, clientId: '' },
+      counselors: Array.isArray(parsed.counselors)
+        ? COUNSELORS.map((counselor) => ({
+            ...counselor,
+            ...(parsed.counselors.find((item) => item.id === counselor.id) || {}),
+          }))
+        : COUNSELORS,
       cases: cases.map((rawCase) => {
         const caze = normalizeWorkflowStatus(rawCase)
         const updatedAt = new Date(caze.updatedAt).getTime()
@@ -81,7 +109,7 @@ function loadState() {
     }
   } catch (error) {
     console.error('Unable to load the saved Campus Case data.', error)
-    return { cases: [], revision: { time: 0, clientId: '' } }
+    return { cases: [], counselors: COUNSELORS, revision: { time: 0, clientId: '' } }
   }
 }
 
@@ -98,6 +126,7 @@ function addDepartmentAccess(caze, department, reason, at) {
 export function CampusProvider({ children }) {
   const initial = loadState()
   const [cases, setCasesState] = useState(initial.cases)
+  const [counselors, setCounselorsState] = useState(initial.counselors)
   const [session, setSession] = useState(() => {
     try {
       const saved = sessionStorage.getItem(SESSION_KEY)
@@ -113,6 +142,7 @@ export function CampusProvider({ children }) {
   const channelRef = useRef(null)
   const seenNotifications = useRef(new Set(notifications.map((notification) => notification.id)))
   const casesRef = useRef(initial.cases)
+  const counselorsRef = useRef(initial.counselors)
   const revisionRef = useRef(initial.revision)
   const unreadNotifications = notifications.filter((notification) => !notification.readAt).length
 
@@ -133,13 +163,41 @@ export function CampusProvider({ children }) {
       sourceClient: clientId.current,
       revision,
       cases: next,
+      counselors: counselorsRef.current,
     }
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ cases: next, revision }))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ cases: next, counselors: counselorsRef.current, revision }))
     } catch (error) {
       console.error('Unable to persist shared Campus Case data.', error)
     }
     if (broadcast) channelRef.current?.postMessage(stateUpdate)
+  }
+
+  const persistCounselors = (nextCounselors) => {
+    counselorsRef.current = nextCounselors
+    setCounselorsState(nextCounselors)
+    const revision = {
+      time: Math.max(Date.now(), revisionRef.current.time + 1),
+      clientId: clientId.current,
+    }
+    revisionRef.current = revision
+    const stateUpdate = {
+      type: 'shared-state',
+      sourceClient: clientId.current,
+      revision,
+      cases: casesRef.current,
+      counselors: nextCounselors,
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        cases: casesRef.current,
+        counselors: nextCounselors,
+        revision,
+      }))
+    } catch (error) {
+      console.error('Unable to persist counselor availability.', error)
+    }
+    channelRef.current?.postMessage(stateUpdate)
   }
 
   const receiveSharedState = (incoming, sourceClient) => {
@@ -152,6 +210,14 @@ export function CampusProvider({ children }) {
     revisionRef.current = revision
     casesRef.current = incoming.cases
     setCasesState(incoming.cases)
+    if (Array.isArray(incoming.counselors)) {
+      const mergedCounselors = COUNSELORS.map((counselor) => ({
+        ...counselor,
+        ...(incoming.counselors.find((item) => item.id === counselor.id) || {}),
+      }))
+      counselorsRef.current = mergedCounselors
+      setCounselorsState(mergedCounselors)
+    }
   }
 
   useEffect(() => {
@@ -222,10 +288,11 @@ export function CampusProvider({ children }) {
     setTimeout(() => setToasts((current) => current.filter((item) => item.id !== id)), toast.id ? 5500 : 4200)
   }
 
-  const onNotification = (notification) => {
-    if (!notification || notification.sourceClient === clientId.current) return
+  const onNotification = (notification, local = false) => {
+    if (!notification || (!local && notification.sourceClient === clientId.current)) return
     if (notification.recipientRole && notification.recipientRole !== session?.role) return
     if (notification.recipientDepartment && notification.recipientDepartment !== session?.department) return
+    if (notification.recipientStaffId && notification.recipientStaffId !== session?.staffId) return
     if (notification.recipientStudentId &&
         notification.recipientStudentId.toLocaleUpperCase() !== session?.studentId?.toLocaleUpperCase()) return
     addToast(notification)
@@ -233,16 +300,25 @@ export function CampusProvider({ children }) {
 
   const notify = (details) => {
     const eventId = crypto.randomUUID()
+    const timestamp = nowIso()
     const notification = {
       id: eventId,
       eventId,
       eventType: details.eventType || 'CASE_EVENT',
-      createdAt: nowIso(),
+      createdAt: timestamp,
+      timestamp,
       sourceClient: clientId.current,
       sourceRole: session?.role,
       sourceDepartment: session?.department || null,
       ...details,
+      recipient: {
+        role: details.recipientRole || null,
+        department: details.recipientDepartment || null,
+        staffId: details.recipientStaffId || null,
+        studentId: details.recipientStudentId || null,
+      },
     }
+    onNotification(notification, true)
     channelRef.current?.postMessage(notification)
     try {
       localStorage.setItem(NOTIFICATION_KEY, JSON.stringify(notification))
@@ -330,20 +406,100 @@ export function CampusProvider({ children }) {
     toast(`Signed in as ${student.name}`)
   }
 
-  const loginStaff = (departmentId) => {
+  const loginStaff = (departmentId, counselorId) => {
     const department = DEPARTMENTS.find((item) => item.id === departmentId)
     if (!department) {
       toast('Choose a valid department to continue')
       return
     }
+    const counselor = counselorsRef.current.find((item) =>
+      item.id === counselorId && item.department === department.name,
+    )
     setSession({
       role: 'staff',
       departmentId: department.id,
       department: department.name,
-      name: department.staffName,
-      title: department.title,
+      staffId: counselor?.id || `department-staff-${department.id}`,
+      name: counselor?.name || department.staffName,
+      title: counselor?.role || department.title,
     })
     toast(`Signed in to ${department.name}`)
+  }
+
+  const updateCounselorAvailability = (counselorId, availability) => {
+    if (!['AVAILABLE', 'BUSY', 'OFFLINE'].includes(availability)) return false
+    if (session?.department !== 'Wellbeing Cell') return false
+    const counselor = counselorsRef.current.find((item) => item.id === counselorId)
+    if (!counselor) return false
+    persistCounselors(counselorsRef.current.map((item) =>
+      item.id === counselorId ? { ...item, availability } : item,
+    ))
+    toast(`${counselor.name} availability set to ${availability.toLowerCase()}`)
+    return true
+  }
+
+  const assignAvailableCounselor = (caseId) => {
+    const target = casesRef.current.find((caze) => caze.id === caseId)
+    if (!target || target.assignedDepartment !== 'Wellbeing Cell' ||
+        target.status !== 'NEW' || target.assignedCounselor) return false
+    const counselor = chooseAvailableCounselor(casesRef.current, counselorsRef.current)
+    if (!counselor) {
+      toast('No counselors are currently available. The case remains awaiting assignment.')
+      return false
+    }
+    assignCounselorToCase(target, counselor)
+    return true
+  }
+
+  const assignCounselorToCase = (target, counselor) => {
+    if (!target || target.status !== 'NEW' || target.assignedCounselor) return false
+    const at = nowIso()
+    const assignment = {
+      id: counselor.id,
+      name: counselor.name,
+      role: counselor.role,
+      assignedAt: at,
+      reason: 'Available counselor with the lowest active workload.',
+    }
+    updateCase(target.id, (caze) => ({
+      ...caze,
+      assignedCounselor: assignment,
+      assignmentStatus: 'ASSIGNED',
+      assignmentReason: assignment.reason,
+      nextAction: 'Your request has been assigned to a counselor. You do not need to contact another office.',
+      updatedAt: at,
+      timeline: [
+        ...caze.timeline,
+        event({
+          at,
+          actor: 'Campus Case',
+          actorRole: 'Assignment service',
+          type: 'COUNSELOR_ASSIGNED',
+          title: 'Counselor assigned',
+          body: 'Your request has been assigned to a counselor. You do not need to contact another office.',
+        }),
+      ],
+    }))
+    notify({
+      eventType: 'COUNSELOR_ASSIGNED',
+      title: 'COUNSELOR ASSIGNED',
+      message: `Your support request ${target.id} has been assigned to ${counselor.name}.`,
+      recipientRole: 'student',
+      recipientStudentId: target.studentId,
+      caseId: target.id,
+      actionHref: `/student/cases/${target.id}`,
+    })
+    notify({
+      eventType: 'COUNSELOR_ASSIGNED',
+      title: 'NEW CASE ASSIGNED',
+      message: `A new student wellbeing case has been assigned to you.\nCase: ${target.id}\nStudent: ${target.studentName}\nSummary: ${target.triage?.summary || target.aiSummary}`,
+      recipientRole: 'staff',
+      recipientDepartment: 'Wellbeing Cell',
+      recipientStaffId: counselor.id,
+      caseId: target.id,
+      actionHref: `/staff/cases/${target.id}`,
+    })
+    return true
   }
 
   const logout = () => setSession(null)
@@ -358,7 +514,9 @@ export function CampusProvider({ children }) {
     const studentId = payload.studentId.trim()
     const studentKey = studentId.toLocaleUpperCase()
     const defaultDepartment = CATEGORY_ROUTING[payload.issueCategory] || 'Student Support Hub'
-    const departments = [...new Set(payload.departments?.length ? payload.departments : [defaultDepartment])]
+    const departments = payload.issueCategory === 'Student Wellbeing'
+      ? [defaultDepartment]
+      : [...new Set(payload.departments?.length ? payload.departments : [defaultDepartment])]
     const uploadedDocuments = await Promise.all((payload.documents || []).map(saveDocument))
     let nextCases = casesRef.current
     const submissions = []
@@ -413,6 +571,21 @@ export function CampusProvider({ children }) {
       const rootId = previousCase ? (previousCase.parentCaseReference || previousCase.id) : null
       const rootCase = rootId ? nextCases.find((caze) => caze.id === rootId) : null
       const id = nextCaseId(nextCases)
+      const wellbeingTriage = assignedDepartment === 'Wellbeing Cell'
+        ? buildWellbeingTriage(payload.description)
+        : null
+      const selectedCounselor = wellbeingTriage
+        ? chooseAvailableCounselor(nextCases, counselorsRef.current)
+        : null
+      const assignedCounselor = selectedCounselor
+        ? {
+            id: selectedCounselor.id,
+            name: selectedCounselor.name,
+            role: selectedCounselor.role,
+            assignedAt: createdAt,
+            reason: 'Available counselor with the lowest active workload.',
+          }
+        : null
       const timeline = [
         event({
           at: createdAt,
@@ -420,9 +593,32 @@ export function CampusProvider({ children }) {
           actorRole: 'Student',
           type: 'CASE_CREATED',
           title: 'Case submitted',
-          body: `Automatically routed to ${assignedDepartment}. The university will coordinate internally if another team is needed.`,
+          body: assignedDepartment === 'Wellbeing Cell'
+            ? selectedCounselor
+              ? 'Your support request has been received.'
+              : 'Your support request has been received and is awaiting counselor assignment.'
+            : `Automatically routed to ${assignedDepartment}. The university will coordinate internally if another team is needed.`,
         }),
       ]
+      if (assignedCounselor) {
+        timeline.push(event({
+          at: createdAt,
+          actor: 'Campus Case',
+          actorRole: 'Assignment service',
+          type: 'COUNSELOR_ASSIGNED',
+          title: 'Counselor assigned',
+          body: 'Your request has been assigned to a counselor. You do not need to contact another office.',
+        }))
+      } else if (wellbeingTriage) {
+        timeline.push(event({
+          at: createdAt,
+          actor: 'Campus Case',
+          actorRole: 'Assignment service',
+          type: 'ASSIGNMENT_PENDING',
+          title: 'Awaiting counselor assignment',
+          body: 'The Wellbeing Cell will assign an available counselor.',
+        }))
+      }
       if (rootCase) {
         timeline.push(event({
           at: createdAt,
@@ -448,11 +644,21 @@ export function CampusProvider({ children }) {
         parentCaseReference: rootCase?.id || null,
         status: 'NEW',
         priority: 'MEDIUM',
-        aiSummary: '',
+        aiSummary: wellbeingTriage?.summary || '',
+        triage: wellbeingTriage,
+        assignedCounselor,
+        assignmentStatus: wellbeingTriage
+          ? assignedCounselor ? 'ASSIGNED' : 'AWAITING'
+          : null,
+        assignmentReason: assignedCounselor?.reason || null,
         patternFlagCount: 0,
         owner: null,
         assignedDepartment,
-        nextAction: `${assignedDepartment} to triage and start working on the request.`,
+        nextAction: assignedDepartment === 'Wellbeing Cell'
+          ? assignedCounselor
+            ? 'Your request has been assigned to a counselor. You do not need to contact another office.'
+            : 'Your support request has been received and is awaiting counselor assignment.'
+          : `${assignedDepartment} to triage and start working on the request.`,
         expectedResponse: expectedFor('NEW'),
         createdAt,
         updatedAt: createdAt,
@@ -477,7 +683,7 @@ export function CampusProvider({ children }) {
           reason: `Shared context for connected student journey ${rootCase.id}`,
           grantedAt: createdAt,
         }))
-      caze.aiSummary = buildFallbackSummary(caze, [...currentJourney, caze])
+      caze.aiSummary = wellbeingTriage?.summary || buildFallbackSummary(caze, [...currentJourney, caze])
       const connectedIds = new Set(currentJourney.map((item) => item.id))
 
       nextCases = [
@@ -521,13 +727,29 @@ export function CampusProvider({ children }) {
       ))
       notifications.push({
         eventType: 'CASE_CREATED',
-        title: 'New case received',
-        message: `A new ${payload.issueCategory} case ${id} has been submitted to ${assignedDepartment}. Review the case and start triage.`,
+        title: assignedCounselor ? 'NEW CASE ASSIGNED' : 'New case received',
+        message: assignedCounselor
+          ? `A new student wellbeing case has been assigned to you.\nCase: ${id}\nStudent: ${caze.studentName}\nSummary: ${caze.triage.summary}`
+          : assignedDepartment === 'Wellbeing Cell'
+            ? `A new student wellbeing case ${id} is awaiting counselor assignment. Review the case and assign an available counselor.`
+            : `A new ${payload.issueCategory} case ${id} has been submitted to ${assignedDepartment}. Review the case and start triage.`,
         recipientRole: 'staff',
         recipientDepartment: assignedDepartment,
+        recipientStaffId: assignedCounselor?.id,
         caseId: id,
         actionHref: `/staff/cases/${id}`,
       })
+      if (assignedCounselor) {
+        notifications.push({
+          eventType: 'COUNSELOR_ASSIGNED',
+          title: 'COUNSELOR ASSIGNED',
+          message: `Your support request ${id} has been assigned to ${assignedCounselor.name}.`,
+          recipientRole: 'student',
+          recipientStudentId: studentId,
+          caseId: id,
+          actionHref: `/student/cases/${id}`,
+        })
+      }
     }
 
     setCases(nextCases)
@@ -605,8 +827,14 @@ export function CampusProvider({ children }) {
 
   const startCase = (id) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status !== 'NEW') return false
+    if (!target || !isAssignedOwner(target, session) || target.status !== 'NEW') {
+      if (target?.assignedDepartment === 'Wellbeing Cell' && target.status === 'NEW') {
+      toast('Only the assigned counselor can start working on this case.')
+      }
+      return false
+    }
     const at = nowIso()
+    const staffLabel = session.name || DEPARTMENTS.find((department) => department.name === session.department)?.staffName || `${session.department} team`
     updateCase(id, (caze) => ({
       ...caze,
       owner: { name: session.name, department: session.department },
@@ -620,13 +848,17 @@ export function CampusProvider({ children }) {
         actorRole: session.department,
         type: 'CASE_STARTED',
         title: 'Case started',
-        body: `${session.name} started working on this case.`,
+        body: target.assignedDepartment === 'Wellbeing Cell'
+          ? 'Your counselor has started reviewing your support request.'
+          : `${staffLabel} started working on this case.`,
       })],
     }))
     notify({
       eventType: 'CASE_STARTED',
-      title: 'Case update',
-      message: `${session.name} started working on your case ${id}.`,
+      title: target.assignedDepartment === 'Wellbeing Cell' ? 'YOUR CASE IS BEING HANDLED' : 'Case update',
+      message: target.assignedDepartment === 'Wellbeing Cell'
+        ? `Your counselor has started reviewing your support request (${id}).`
+        : `${staffLabel} started working on your case ${id}.`,
       recipientRole: 'student',
       recipientStudentId: target.studentId,
       caseId: id,
@@ -637,7 +869,7 @@ export function CampusProvider({ children }) {
 
   const moveToUnderReview = (id) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status === 'RESOLVED') return false
+    if (!target || !isAssignedOwner(target, session) || target.status === 'RESOLVED') return false
     if (!['IN PROGRESS', 'COORDINATION REQUIRED'].includes(target.status)) return false
     if (target.internalTasks.some((task) => task.status === 'open')) {
       toast('Complete the open coordination task before moving this case to review.')
@@ -648,7 +880,9 @@ export function CampusProvider({ children }) {
       ...caze,
       status: 'UNDER REVIEW',
       outcomeVerified: false,
-      nextAction: `${session.department} to verify the outcome before resolution.`,
+      nextAction: target.assignedDepartment === 'Wellbeing Cell'
+        ? 'Your support request has been reviewed.'
+        : `${session.department} to verify the outcome before resolution.`,
       expectedResponse: expectedFor('UNDER REVIEW'),
       updatedAt: at,
       timeline: [...caze.timeline, event({
@@ -657,13 +891,17 @@ export function CampusProvider({ children }) {
         actorRole: session.department,
         type: 'CASE_MOVED_TO_REVIEW',
         title: 'Case moved to under review',
-        body: `${session.department} is reviewing the work completed before resolving the case.`,
+        body: target.assignedDepartment === 'Wellbeing Cell'
+          ? 'Your support request has been reviewed.'
+          : `${session.department} is reviewing the work completed before resolving the case.`,
       })],
     }))
     notify({
       eventType: 'CASE_MOVED_TO_REVIEW',
       title: 'Case under review',
-      message: `${session.department} moved case ${id} to under review and is verifying the outcome.`,
+      message: target.assignedDepartment === 'Wellbeing Cell'
+        ? `Your support request for case ${id} has been reviewed. The Wellbeing Cell is verifying the next steps.`
+        : `${session.department} moved case ${id} to under review and is verifying the outcome.`,
       recipientRole: 'student',
       recipientStudentId: target.studentId,
       caseId: id,
@@ -674,13 +912,15 @@ export function CampusProvider({ children }) {
 
   const verifyOutcome = (id, detail) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status !== 'UNDER REVIEW' || target.outcomeVerified) return false
+    if (!target || !isAssignedOwner(target, session) || target.status !== 'UNDER REVIEW' || target.outcomeVerified) return false
     const at = nowIso()
     updateCase(id, (caze) => ({
       ...caze,
       outcomeVerified: true,
       outcomeVerification: detail.trim(),
-      nextAction: 'Outcome verified. The owning department can resolve the case.',
+      nextAction: target.assignedDepartment === 'Wellbeing Cell'
+        ? 'Your support team is preparing the next steps.'
+        : 'Outcome verified. The owning department can resolve the case.',
       updatedAt: at,
       timeline: [...caze.timeline, event({
         at,
@@ -697,7 +937,7 @@ export function CampusProvider({ children }) {
 
   const changePriority = (id, priority) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status === 'RESOLVED') return false
+    if (!target || !isAssignedOwner(target, session) || target.status === 'RESOLVED') return false
     updateCase(id, (caze) => ({
       ...caze,
       priority,
@@ -720,7 +960,7 @@ export function CampusProvider({ children }) {
 
   const requestFromStudent = (id, message) => {
     const target = casesRef.current.find((item) => item.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status !== 'IN PROGRESS') return false
+    if (!target || !isAssignedOwner(target, session) || target.status !== 'IN PROGRESS') return false
     const at = nowIso()
     updateCase(id, (caze) => ({
       ...caze,
@@ -743,7 +983,9 @@ export function CampusProvider({ children }) {
     notify({
       eventType: 'INFO_REQUESTED',
       title: 'Information requested',
-      message: `${session.department} needs additional information for case ${id}: ${message}`,
+      message: target.assignedDepartment === 'Wellbeing Cell'
+        ? `Your counselor needs some additional information for case ${id}: ${message}`
+        : `${session.department} needs additional information for case ${id}: ${message}`,
       recipientRole: 'student',
       recipientStudentId: target.studentId,
       caseId: id,
@@ -755,7 +997,7 @@ export function CampusProvider({ children }) {
 
   const addInternalNote = (id, body) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status !== 'IN PROGRESS') return false
+    if (!target || !isAssignedOwner(target, session) || target.status !== 'IN PROGRESS') return false
     updateCase(id, (caze) => ({
       ...caze,
       updatedAt: nowIso(),
@@ -777,7 +1019,7 @@ export function CampusProvider({ children }) {
 
   const createInternalTask = (id, { toDepartment, title, detail }) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.assignedDepartment !== session?.department || target.status !== 'IN PROGRESS' ||
+    if (!target || !isAssignedOwner(target, session) || target.status !== 'IN PROGRESS' ||
         !DEPARTMENTS.some((department) => department.name === toDepartment && department.name !== session.department)) {
       toast('Only the owning department can coordinate a case that is in progress.')
       return false
@@ -807,7 +1049,9 @@ export function CampusProvider({ children }) {
       return {
         ...connected,
         status: 'COORDINATION REQUIRED',
-        nextAction: `${toDepartment} to complete an internal task. The student does not need to visit another office.`,
+        nextAction: target.assignedDepartment === 'Wellbeing Cell'
+          ? `Your support team is coordinating with ${toDepartment}. You do not need to visit another office or repeat your situation.`
+          : `${toDepartment} to complete an internal task. The student does not need to visit another office.`,
         expectedResponse: expectedFor('COORDINATION REQUIRED'),
         updatedAt: at,
         internalTasks: [...caze.internalTasks, task],
@@ -819,7 +1063,9 @@ export function CampusProvider({ children }) {
             actorRole: session.department,
             type: 'COORDINATION_STARTED',
             title: 'Internal coordination started',
-            body: `${toDepartment} has been asked to help inside this case. The student does not need to visit another office.`,
+            body: target.assignedDepartment === 'Wellbeing Cell'
+              ? `Your support team is coordinating with ${toDepartment}. You do not need to visit another office or repeat your situation.`
+              : `${toDepartment} has been asked to help inside this case. The student does not need to visit another office.`,
           }),
           event({
             at,
@@ -836,7 +1082,9 @@ export function CampusProvider({ children }) {
     notify({
       eventType: 'COORDINATION_TASK_CREATED',
       title: 'New coordination task',
-      message: `${session.department} asked ${toDepartment} to help with ${target.issueCategory.toLowerCase()} case ${id}: ${title.trim().replace(/[.!?]+$/, '')}.`,
+      message: target.assignedDepartment === 'Wellbeing Cell' && toDepartment === 'Academic Support'
+        ? `A wellbeing support task for case ${id} has been assigned to Academic Support. Review the limited support request and report the next step to Wellbeing Cell.`
+        : `${session.department} asked ${toDepartment} to help with ${target.issueCategory.toLowerCase()} case ${id}: ${title.trim().replace(/[.!?]+$/, '')}.`,
       recipientRole: 'staff',
       recipientDepartment: toDepartment,
       caseId: id,
@@ -845,7 +1093,9 @@ export function CampusProvider({ children }) {
     notify({
       eventType: 'COORDINATION_STARTED',
       title: 'University coordination',
-      message: `${session.department} has started internal coordination for case ${id}. You do not need to visit another office.`,
+      message: target.assignedDepartment === 'Wellbeing Cell'
+      ? `Your support team is coordinating with ${toDepartment} on case ${id}. You do not need to visit another office.`
+        : `${session.department} has started internal coordination for case ${id}. You do not need to visit another office.`,
       recipientRole: 'student',
       recipientStudentId: target.studentId,
       caseId: id,
@@ -908,8 +1158,12 @@ export function CampusProvider({ children }) {
                 actor: session.name,
                 actorRole: session.department,
                 type: 'COORDINATION_UPDATED',
-                title: 'University coordination updated',
-                body: 'The university team has completed its internal step. The owning department will continue your case.',
+                title: source.assignedDepartment === 'Wellbeing Cell' && session.department === 'Academic Support'
+                  ? 'Academic Support responded'
+                  : 'University coordination updated',
+                body: source.assignedDepartment === 'Wellbeing Cell' && session.department === 'Academic Support'
+                  ? 'Academic Support has responded. Your counselor will review the update.'
+                  : 'The university team has completed its internal step. The owning department will continue your case.',
               }),
             ],
           }
@@ -918,9 +1172,12 @@ export function CampusProvider({ children }) {
     notify({
       eventType: 'COORDINATION_COMPLETED',
       title: 'Coordination complete',
-      message: `${session.department} completed the requested verification for ${caseId}. Review the result and decide the next case action.`,
+      message: source.assignedDepartment === 'Wellbeing Cell' && session.department === 'Academic Support'
+        ? `Academic Support completed the requested task for ${caseId}. Review the result and decide the next case action.`
+        : `${session.department} completed the requested verification for ${caseId}. Review the result and decide the next case action.`,
       recipientRole: 'staff',
       recipientDepartment: source.assignedDepartment,
+      recipientStaffId: source.assignedCounselor?.id,
       caseId,
       actionHref: `/staff/cases/${caseId}`,
     })
@@ -934,7 +1191,7 @@ export function CampusProvider({ children }) {
       toast('This case could not be found.')
       return false
     }
-    if (target.assignedDepartment !== session?.department) {
+    if (!isAssignedOwner(target, session)) {
       toast(`Only ${target.assignedDepartment} can resolve this case.`)
       return false
     }
@@ -954,7 +1211,9 @@ export function CampusProvider({ children }) {
     updateCase(id, (caze) => ({
       ...caze,
       status: 'RESOLVED',
-      nextAction: 'None — case closed.',
+      nextAction: target.assignedDepartment === 'Wellbeing Cell'
+        ? 'Your support request has been coordinated and your next steps have been shared with you.'
+        : 'None — case closed.',
       expectedResponse: expectedFor('RESOLVED'),
       updatedAt: at,
       timeline: [
@@ -965,14 +1224,18 @@ export function CampusProvider({ children }) {
           actorRole: session.department,
           type: 'CASE_RESOLVED',
           title: 'Case resolved',
-          body: outcome || caze.outcomeVerification || 'The requested action has been completed.',
+          body: caze.assignedDepartment === 'Wellbeing Cell'
+            ? 'Your support request has been coordinated and your next steps have been shared with you.'
+            : outcome || caze.outcomeVerification || 'The requested action has been completed.',
         }),
       ],
     }))
     notify({
       eventType: 'CASE_RESOLVED',
-      title: 'Case resolved',
-      message: `Your case ${id} has been resolved by ${session.department}. ${outcome || target.outcomeVerification || 'The requested action has been completed.'}`,
+      title: target.assignedDepartment === 'Wellbeing Cell' ? 'CASE RESOLVED' : 'Case resolved',
+      message: target.assignedDepartment === 'Wellbeing Cell'
+        ? `Your support request ${id} has been resolved.`
+        : `Your case ${id} has been resolved by ${session.department}. ${outcome || target.outcomeVerification || 'The requested action has been completed.'}`,
       recipientRole: 'student',
       recipientStudentId: target.studentId,
       caseId: id,
@@ -984,7 +1247,7 @@ export function CampusProvider({ children }) {
 
   const grantAccess = (id, department, reason) => {
     const target = casesRef.current.find((caze) => caze.id === id)
-    if (!target || target.status === 'RESOLVED' || target.assignedDepartment !== session?.department) return false
+    if (!target || target.status === 'RESOLVED' || !isAssignedOwner(target, session)) return false
     const at = nowIso()
     updateCase(id, (caze) => ({
       ...addDepartmentAccess(caze, department, reason, at),
@@ -1009,6 +1272,7 @@ export function CampusProvider({ children }) {
   const value = useMemo(
     () => ({
       cases,
+      counselors,
       session,
       toasts,
       notifications,
@@ -1018,6 +1282,8 @@ export function CampusProvider({ children }) {
       toast,
       loginStudent,
       loginStaff,
+      updateCounselorAvailability,
+      assignAvailableCounselor,
       logout,
       resetDemo,
       createCase,
@@ -1033,7 +1299,7 @@ export function CampusProvider({ children }) {
       resolveCase,
       grantAccess,
     }),
-    [cases, session, toasts, notifications, unreadNotifications],
+    [cases, counselors, session, toasts, notifications, unreadNotifications],
   )
 
   return <CampusContext.Provider value={value}>{children}</CampusContext.Provider>

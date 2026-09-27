@@ -19,22 +19,30 @@ export const CATEGORIES = [
   'Fees/Finance',
   'Marks/Results',
   'Hostel',
-  'Wellbeing',
+  'Student Wellbeing',
   'Scholarship',
   'Other',
 ]
 
 export const CATEGORY_ROUTING = {
-  Academics: 'Academic Services',
+  Academics: 'Academic Support',
+  'Student Wellbeing': 'Wellbeing Cell',
+  Wellbeing: 'Wellbeing Cell',
   Attendance: 'Attendance Cell',
   Examination: 'Examinations Office',
   'Fees/Finance': 'Fees & Finance',
   'Marks/Results': 'Examinations Office',
   Hostel: 'Hostel Administration',
-  Wellbeing: 'Wellbeing & Counselling',
   Scholarship: 'Scholarships Office',
   Other: 'Student Support Hub',
 }
+
+export const COUNSELORS = [
+  { id: 'counselor-ananya-rao', name: 'Ananya Rao', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'AVAILABLE' },
+  { id: 'counselor-rohan-mehta', name: 'Rohan Mehta', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'AVAILABLE' },
+  { id: 'counselor-priya-nair', name: 'Priya Nair', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'BUSY' },
+  { id: 'counselor-arjun-kumar', name: 'Arjun Kumar', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'OFFLINE' },
+]
 
 export const DEPARTMENTS = [
   {
@@ -53,10 +61,10 @@ export const DEPARTMENTS = [
   },
   {
     id: 'wellbeing',
-    name: 'Wellbeing & Counselling',
-    staffName: 'Wellbeing Advisor',
-    title: 'Wellbeing Advisor',
-    blurb: 'Lead for student support cases.',
+    name: 'Wellbeing Cell',
+    staffName: 'Wellbeing Officer',
+    title: 'Wellbeing Officer',
+    blurb: 'Coordinates joined-up student support cases.',
   },
   {
     id: 'fees',
@@ -67,9 +75,9 @@ export const DEPARTMENTS = [
   },
   {
     id: 'academic',
-    name: 'Academic Services',
-    staffName: 'Academic Support Lead',
-    title: 'Academic Support Lead',
+    name: 'Academic Support',
+    staffName: 'Academic Support Officer',
+    title: 'Academic Support Officer',
     blurb: 'Coursework, extensions, and faculty coordination.',
   },
   {
@@ -145,6 +153,51 @@ export function buildFallbackSummary(caze, journeyCases) {
     ...(item.involvedDepartments || []),
   ]))]
   return `${current} It is connected to ${linked.length} ${linked.length === 1 ? 'other case' : 'other cases'} across ${departments.join(', ')}, so the student’s context is carried forward.`
+}
+
+export function buildWellbeingTriage(description) {
+  const content = description.trim().replace(/\s+/g, ' ')
+  const lower = content.toLocaleLowerCase()
+  const areas = []
+  if (/class|academ|assignment|course|study|learning/.test(lower)) areas.push('Academic Support')
+  if (/attend|missed|absence|class/.test(lower)) areas.push('Attendance Support')
+  const supportAreas = ['Wellbeing / Counseling', ...new Set(areas)]
+  const difficulties = [
+    /class|academ|assignment|course|study|learning/.test(lower) && 'academics and assignments',
+    /attend|missed|absence/.test(lower) && 'attendance',
+  ].filter(Boolean)
+  const hasContactedWellbeing = /already contacted|contacted.*wellbeing|wellbeing team/.test(lower)
+  const summary = difficulties.length
+    ? `Student reports difficulty managing ${difficulties.join(' and ')}${hasContactedWellbeing ? ' and has already contacted the wellbeing team' : ''}.`
+    : content
+      ? `Student support request: ${content.slice(0, 220).replace(/[.!?]+$/, '')}${content.length > 220 ? '…' : ''}.`
+      : 'The student submitted a wellbeing support request.'
+  return {
+    summary,
+    supportAreas,
+    primaryDepartment: 'Wellbeing / Counseling Cell',
+    suggestedDepartment: supportAreas.includes('Academic Support') ? 'Academic Support' : null,
+    suggestedNextAction: 'Assign the case to an available counselor for initial review.',
+    source: 'deterministic-fallback',
+  }
+}
+
+export function counselorWorkload(cases, counselors) {
+  return counselors.map((counselor) => ({
+    ...counselor,
+    activeCaseCount: cases.filter((caze) =>
+      caze.assignedCounselor?.id === counselor.id && caze.status !== 'RESOLVED',
+    ).length,
+    assignedCases: cases
+      .filter((caze) => caze.assignedCounselor?.id === counselor.id && caze.status !== 'RESOLVED')
+      .map((caze) => caze.id),
+  }))
+}
+
+export function chooseAvailableCounselor(cases, counselors) {
+  return counselorWorkload(cases, counselors)
+    .filter((counselor) => counselor.availability === 'AVAILABLE')
+    .sort((a, b) => a.activeCaseCount - b.activeCaseCount || a.id.localeCompare(b.id))[0] || null
 }
 
 export function isAttentionRequired(caze, now = Date.now()) {

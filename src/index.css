@@ -360,6 +360,7 @@ textarea { min-height: 110px; resize: vertical; }
 }
 .toast-title { font-size: 0.92rem; }
 .notification-toast a { font-weight: 600; }
+.notification-toast span { white-space: pre-line; }
 .notification-center {
   position: fixed;
   top: 76px;
@@ -411,6 +412,16 @@ textarea { min-height: 110px; resize: vertical; }
 .staff-queue-sections { display: grid; gap: 14px; margin-top: 16px; }
 .queue-section { margin-top: 16px; }
 .staff-queue-sections .queue-section { margin-top: 0; }
+.counselor-dashboard, .counselor-availability { margin-top: 16px; }
+.counselor-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.counselor-metric { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.counselor-metric strong { font-size: 1.35rem; }
+.counselor-metric span { color: var(--ink-soft); font-size: 0.78rem; }
+.counselor-list { display: grid; gap: 8px; margin-top: 12px; }
+.counselor-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.counselor-row .compact-control { min-width: 150px; }
+.counselor-login-list { margin-top: 12px; }
+.badge.ASSIGNED { background: var(--gold-soft); color: #7a5a28; }
 .queue-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .queue-section-heading .hint { margin: 0; }
 .queue-count {
@@ -464,9 +475,16 @@ textarea { min-height: 110px; resize: vertical; }
   .grid-2, .grid-3, .stats, .staff-stats, .login-grid, .meta, .case-row, .queue-row, .staff-case-grid, .department-checklist {
     grid-template-columns: 1fr;
   }
+
+  .counselor-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .topbar { padding: 12px 16px; }
   .page { width: min(100% - 24px, 1120px); }
   .queue-row, .case-row { cursor: pointer; }
   .case-heading, .section-heading { flex-direction: column; }
   .journey-metrics { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 520px) {
+  .counselor-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .counselor-row { align-items: flex-start; flex-direction: column; }
 }

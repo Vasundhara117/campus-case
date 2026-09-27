@@ -7,16 +7,20 @@ export function Mark() {
   return <div className="mark" aria-hidden>C</div>
 }
 
-export function StatusBadge({ status, student = false }) {
+export function StatusBadge({ status, student = false, counselorAssigned = false }) {
   const displayStatus = student
-    ? status === 'IN PROGRESS'
-      ? 'BEING HANDLED'
-      : status === 'COORDINATION REQUIRED'
-        ? 'INTERNAL COORDINATION'
-        : status
+    ? status === 'NEW' && counselorAssigned
+      ? 'COUNSELOR ASSIGNED'
+      : status === 'IN PROGRESS'
+        ? 'BEING HANDLED'
+        : status === 'COORDINATION REQUIRED'
+          ? 'INTERNAL COORDINATION'
+          : status
     : status
   const cls = displayStatus === 'IN PROGRESS' || displayStatus === 'BEING HANDLED'
     ? 'PROGRESS'
+    : displayStatus === 'COUNSELOR ASSIGNED'
+      ? 'ASSIGNED'
     : displayStatus.startsWith('UNDER')
       ? 'UNDER'
       : displayStatus.startsWith('WAITING')
@@ -118,7 +122,7 @@ export function Timeline({ events, staff }) {
         <li key={e.id}>
           <div className="when">
             {new Date(e.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-            {' · '}{e.actor}{e.caseId ? ` · ${e.caseId}` : ''}
+            {' · '}{staff ? e.actor : e.actorRole === 'Student' ? 'You' : 'Campus Case team'}{e.caseId ? ` · ${e.caseId}` : ''}
           </div>
           <h4>{e.title}{e.visibility === 'internal' ? ' · internal' : ''}</h4>
           <p>{e.body}</p>
