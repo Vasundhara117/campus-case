@@ -43,9 +43,13 @@ export default function StaffHome() {
   const visible = cases.filter((caze) => staffCanSee(caze, session.department))
   const owning = visible.filter((caze) => caze.assignedDepartment === session.department)
   const counselingCell = session.department === 'Wellbeing Cell'
-  const myCases = owning.filter((caze) =>
-    counselingCell && caze.assignedCounselor?.id === session.staffId,
-  )
+  const myCases = counselingCell
+    ? owning.filter((caze) => caze.assignedCounselor?.id === session.staffId)
+    : owning
+  const queueCases = counselingCell ? myCases : owning
+  const awaitingAssignment = counselingCell
+    ? owning.filter((caze) => caze.status === 'NEW' && !caze.assignedCounselor)
+    : []
   const workload = counselorWorkload(cases, counselors)
   const assignedTasks = visible.flatMap((caze) =>
     (caze.internalTasks || [])
@@ -73,60 +77,21 @@ export default function StaffHome() {
       </p>
 
       {counselingCell && (
-        <>
-          <section className="card counselor-dashboard">
-            <p className="kicker">Counseling Cell</p>
+        <section className="card counselor-dashboard">
+            <p className="kicker">My Work · {session.name}</p>
             <div className="counselor-metrics">
               {[
-                ['New Cases', owning.filter((caze) => caze.status === 'NEW').length],
                 ['Assigned to Me', myCases.filter((caze) => caze.status !== 'RESOLVED').length],
-                ['In Progress', owning.filter((caze) => caze.status === 'IN PROGRESS').length],
-                ['Needs Coordination', owning.filter((caze) => caze.status === 'COORDINATION REQUIRED').length],
-                ['Under Review', owning.filter((caze) => caze.status === 'UNDER REVIEW').length],
-                ['Resolved', owning.filter((caze) => caze.status === 'RESOLVED').length],
+                ['New', myCases.filter((caze) => caze.status === 'NEW').length],
+                ['In Progress', myCases.filter((caze) => caze.status === 'IN PROGRESS').length],
+                ['Needs My Review', myCases.filter((caze) => caze.status === 'UNDER REVIEW').length],
+                ['Needs Coordination', myCases.filter((caze) => caze.status === 'COORDINATION REQUIRED').length],
+                ['My Resolved Cases', myCases.filter((caze) => caze.status === 'RESOLVED').length],
               ].map(([label, count]) => (
                 <div className="counselor-metric" key={label}><strong>{count}</strong><span>{label}</span></div>
               ))}
             </div>
-          </section>
-
-          <section className="card queue-section counselor-availability">
-            <div className="queue-section-heading">
-              <div><p className="kicker">Counselor availability</p><p className="hint">Assignment goes to an available counselor with the lowest active workload.</p></div>
-            </div>
-            <div className="counselor-list">
-              {workload.filter((counselor) => counselor.department === session.department).map((counselor) => (
-                <div className="counselor-row" key={counselor.id}>
-                  <div>
-                    <strong>{counselor.name}</strong>
-                    <div className="hint">{counselor.role} · {counselor.activeCaseCount} active cases</div>
-                    {counselor.assignedCases.length > 0 && <div className="hint">Cases: {counselor.assignedCases.join(', ')}</div>}
-                  </div>
-                  <label className="compact-control">Availability
-                    <select
-                      value={counselor.availability}
-                      onChange={(event) => updateCounselorAvailability(counselor.id, event.target.value)}
-                    >
-                      <option value="AVAILABLE">Available</option>
-                      <option value="BUSY">Busy</option>
-                      <option value="OFFLINE">Offline</option>
-                    </select>
-                  </label>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="card queue-section">
-            <div className="queue-section-heading">
-              <div><p className="kicker">Assigned to me</p><p className="hint">{session.name} · {session.title}</p></div>
-              <span className="queue-count">{myCases.filter((caze) => caze.status !== 'RESOLVED').length}</span>
-            </div>
-            {myCases.length === 0
-              ? <p className="hint">No cases are assigned to you yet.</p>
-              : myCases.map((caze) => <CaseRow key={caze.id} caze={caze} session={session} navigate={navigate} />)}
-          </section>
-        </>
+        </section>
       )}
 
       {assignedTasks.length > 0 && (
@@ -151,22 +116,68 @@ export default function StaffHome() {
 
       <div className="staff-queue-sections">
         {QUEUE_SECTIONS.map((section) => {
-          const rows = owning
+          const title = counselingCell && section.status === 'UNDER REVIEW'
+            ? 'Needs My Review'
+            : counselingCell && section.status === 'RESOLVED'
+              ? 'My Resolved Cases'
+              : section.title
+          const rows = queueCases
             .filter((caze) => caze.status === section.status)
             .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
           return (
             <section className="card queue-section" key={section.status}>
               <div className="queue-section-heading">
-                <div><p className="kicker">{section.title}</p><p className="hint">{section.description}</p></div>
+                <div><p className="kicker">{title}</p><p className="hint">{counselingCell ? `Cases assigned to ${session.name}.` : section.description}</p></div>
                 <span className="queue-count">{rows.length}</span>
               </div>
               {rows.length === 0
-                ? <p className="hint">No {section.title.toLowerCase()} cases.</p>
+                ? <p className="hint">{counselingCell && section.status === 'RESOLVED' ? 'No resolved cases assigned to you.' : `No ${title.toLowerCase()} cases.`}</p>
                 : rows.map((caze) => <CaseRow key={caze.id} caze={caze} session={session} navigate={navigate} />)}
             </section>
           )
         })}
       </div>
+
+      {counselingCell && (
+        <section className="card queue-section counselor-availability">
+          <div className="queue-section-heading">
+            <div><p className="kicker">Team status</p><p className="hint">Automatic assignment selects an available counselor with the lowest active workload.</p></div>
+          </div>
+          <div className="counselor-list">
+            {workload.filter((counselor) => counselor.department === session.department).map((counselor) => (
+              <div className="counselor-row" key={counselor.id}>
+                <div>
+                  <strong>{counselor.name}</strong>
+                  <div className="hint">{counselor.role} · {counselor.availability} · {counselor.activeCaseCount} active</div>
+                </div>
+                {counselor.id === session.staffId && counselor.activeCaseCount === 0 && (
+                  <button
+                    className="btn secondary"
+                    type="button"
+                    onClick={() => updateCounselorAvailability(
+                      counselor.id,
+                      counselor.availability === 'AVAILABLE' ? 'OFFLINE' : 'AVAILABLE',
+                    )}
+                  >
+                    {counselor.availability === 'AVAILABLE' ? 'Set Offline' : 'Set Available'}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {awaitingAssignment.length > 0 && (
+            <div className="queue-section">
+              <div className="queue-section-heading">
+                <div><p className="kicker">Awaiting counselor assignment</p><p className="hint">No available counselor was found at intake.</p></div>
+                <span className="queue-count">{awaitingAssignment.length}</span>
+              </div>
+              {awaitingAssignment.map((caze) => (
+                <CaseRow key={caze.id} caze={caze} session={session} navigate={navigate} />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {supporting.length > 0 && (
         <section className="card queue-section">

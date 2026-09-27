@@ -182,15 +182,20 @@ export function buildWellbeingTriage(description) {
   }
 }
 
+const ACTIVE_COUNSELOR_STATUSES = ['IN PROGRESS', 'COORDINATION REQUIRED', 'UNDER REVIEW']
+
 export function counselorWorkload(cases, counselors) {
   return counselors.map((counselor) => ({
     ...counselor,
     activeCaseCount: cases.filter((caze) =>
-      caze.assignedCounselor?.id === counselor.id && caze.status !== 'RESOLVED',
+      caze.assignedCounselor?.id === counselor.id && ACTIVE_COUNSELOR_STATUSES.includes(caze.status),
     ).length,
     assignedCases: cases
-      .filter((caze) => caze.assignedCounselor?.id === counselor.id && caze.status !== 'RESOLVED')
+      .filter((caze) => caze.assignedCounselor?.id === counselor.id && ACTIVE_COUNSELOR_STATUSES.includes(caze.status))
       .map((caze) => caze.id),
+    availability: cases.some((caze) =>
+      caze.assignedCounselor?.id === counselor.id && ACTIVE_COUNSELOR_STATUSES.includes(caze.status),
+    ) ? 'BUSY' : counselor.availability,
   }))
 }
 

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { DEPARTMENTS, PRIORITIES, formatWhen, getJourneyCases, staffCanSee, visibilityReason } from '../data'
+import { counselorWorkload, DEPARTMENTS, PRIORITIES, formatWhen, getJourneyCases, staffCanSee, visibilityReason } from '../data'
 import { DocumentList, Modal, StatusBadge, Timeline } from '../ui.jsx'
 import { useCampus } from '../CampusContext.jsx'
 
@@ -115,7 +115,11 @@ export default function StaffCase() {
   const [taskTitle, setTaskTitle] = useState('')
   const [taskToComplete, setTaskToComplete] = useState(null)
 
-  if (!caze || !staffCanSee(caze, session.department)) {
+  if (!caze || !staffCanSee(caze, session.department) ||
+      (session.department === 'Wellbeing Cell' &&
+        caze.assignedDepartment === 'Wellbeing Cell' &&
+        caze.assignedCounselor &&
+        caze.assignedCounselor.id !== session.staffId)) {
     return <div className="page"><p>This case is outside your need-to-know access.</p><Link to="/staff">Back to queue</Link></div>
   }
 
@@ -129,6 +133,9 @@ export default function StaffCase() {
   const isAssignedCounselor = !isCounselingCase || caze.assignedCounselor?.id === session.staffId
   const canWorkCase = isOwner && isAssignedCounselor
   const isResolved = caze.status === 'RESOLVED'
+  const counselorLoad = caze.assignedCounselor
+    ? counselorWorkload(cases, ctx.counselors).find((item) => item.id === caze.assignedCounselor.id)
+    : null
   const departments = [...new Set([
     ...journey.map((item) => item.assignedDepartment),
     ...journey.flatMap((item) => item.involvedDepartments || []),
@@ -205,6 +212,7 @@ export default function StaffCase() {
       <p className="kicker"><Link to="/staff">Department queue</Link> · {caze.id} · {visibilityReason(caze, session.department)}</p>
       <div className="case-heading">
         <div>
+          <p className="kicker">CASE {caze.id} · {caze.issueCategory}</p>
           <h1 className="h1">{caze.title}</h1>
           <p className="lede" style={{ margin: '8px 0 0' }}>{caze.studentName} · {caze.studentProgramme} · Student ID {caze.studentId}</p>
         </div>
@@ -220,6 +228,8 @@ export default function StaffCase() {
         <div className="case-summary-item"><span>Last updated</span><strong>{formatWhen(caze.updatedAt)}</strong></div>
         {isCounselingCase && <>
           <div className="case-summary-item"><span>Assigned counselor</span><strong>{caze.assignedCounselor?.name || 'Awaiting counselor assignment'}</strong></div>
+          {caze.assignedCounselor && <div className="case-summary-item"><span>Counselor role</span><strong>{caze.assignedCounselor.role}</strong></div>}
+          {counselorLoad && <div className="case-summary-item"><span>Counselor status</span><strong>{counselorLoad.availability} · {counselorLoad.activeCaseCount} active {counselorLoad.activeCaseCount === 1 ? 'case' : 'cases'}</strong></div>}
           {caze.assignedCounselor && <div className="case-summary-item"><span>Assignment reason</span><strong>{caze.assignmentReason}</strong></div>}
         </>}
         {!isCounselingCase && <div className="case-summary-item"><span>Handled by</span><strong>{caze.owner?.name || 'Not yet taken'}</strong></div>}
@@ -289,6 +299,11 @@ export default function StaffCase() {
             {!caze.outcomeVerified && <span className="hint">Verify the outcome before resolution.</span>}
           </div>
         ) : null}
+        {!isResolved && canWorkCase && caze.status !== 'NEW' && (
+          <div className="actions" style={{ marginTop: 12 }}>
+            <button className="btn secondary" type="button" onClick={() => { setText(''); setModal('student-update') }}>Send Update to Student</button>
+          </div>
+        )}
       </section>
 
       <div className="grid staff-case-grid">
@@ -360,7 +375,10 @@ export default function StaffCase() {
               </article>
             ))}
           </section>
-          <section className="card quiet"><p className="kicker">Case timeline</p><Timeline events={journeyTimeline} staff /></section>
+          <section className="card quiet">
+            <p className="kicker">Case timeline</p>
+            <Timeline events={journeyTimeline} staff />
+          </section>
         </div>
       </div>
 
@@ -369,6 +387,10 @@ export default function StaffCase() {
       </Modal>}
       {modal === 'note' && <Modal title="Add an internal note" onClose={close} footer={<button className="btn" type="button" onClick={() => { if (ctx.addInternalNote(caze.id, text)) close() }} disabled={!text.trim()}>Save note</button>}>
         <label>Internal note<textarea required value={text} onChange={(event) => setText(event.target.value)} /></label><p className="hint">Only staff with case access can see this note.</p>
+      </Modal>}
+      {modal === 'student-update' && <Modal title="Send an update to the student" onClose={close} footer={<button className="btn" type="button" onClick={() => { if (ctx.addStudentUpdate(caze.id, text)) close() }} disabled={!text.trim()}>Send Update to Student</button>}>
+        <label>Student update<textarea required value={text} onChange={(event) => setText(event.target.value)} placeholder="Write a clear, supportive update for the student." /></label>
+        <p className="hint">This message is visible to the student and appears in their case timeline. Use Internal Note for staff-only information.</p>
       </Modal>}
       {modal === 'coordinate' && <Modal title="Coordinate internally" onClose={close} footer={<button className="btn" type="button" onClick={() => { if (ctx.createInternalTask(caze.id, { toDepartment, title: taskTitle, detail: text })) close() }} disabled={!taskTitle.trim() || !toDepartment}>Create coordination task</button>}>
         <p className="hint">The supporting department receives need-to-know access to this case. The student will be told that teams are coordinating internally.</p>

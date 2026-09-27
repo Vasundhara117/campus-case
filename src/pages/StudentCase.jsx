@@ -26,11 +26,12 @@ export default function StudentCase() {
   const supportingDepartments = [...new Set(caze.internalTasks.map((task) => task.to))]
   const publicEvents = caze.timeline.filter((event) => event.visibility !== 'internal')
   const latestUpdate = [...publicEvents].sort((a, b) => new Date(b.at) - new Date(a.at))[0]
+  const latestCounselorUpdate = [...(caze.studentUpdates || [])].sort((a, b) => new Date(b.at) - new Date(a.at))[0]
   const journey = getJourneyCases(cases, caze)
 
   return (
     <div className="page">
-      <p className="kicker"><Link to="/student">Your cases</Link> · {caze.id}</p>
+      <p className="kicker"><Link to="/student">Your cases</Link> · CASE {caze.id}</p>
       <h1 className="h1">{caze.title}</h1>
       <StatusBadge status={caze.status} student counselorAssigned={Boolean(caze.assignedCounselor)} />
       {coordinating && caze.status !== 'RESOLVED' && (
@@ -47,11 +48,18 @@ export default function StudentCase() {
             <div className="meta-item"><span>Case ID</span><strong>{caze.id}</strong></div>
             <div className="meta-item"><span>Issue</span><strong>{caze.issueCategory}</strong></div>
             <div className="meta-item"><span>Assigned team</span><strong>{wellbeingCase ? 'Wellbeing / Counseling Cell' : caze.assignedDepartment}</strong></div>
-            {wellbeingCase && <div className="meta-item"><span>Counselor assigned</span><strong>{caze.assignedCounselor?.name || 'Awaiting counselor assignment'}</strong></div>}
+            {wellbeingCase && <div className="meta-item"><span>Counselor</span><strong>{caze.assignedCounselor?.name || 'Awaiting counselor assignment'}</strong></div>}
             {wellbeingCase && caze.assignedCounselor && <div className="meta-item"><span>Role</span><strong>{caze.assignedCounselor.role}</strong></div>}
             <div className="meta-item"><span>Next action</span><strong>{wellbeingCase ? studentNextAction(caze) : caze.nextAction}</strong></div>
             <div className="meta-item"><span>Latest update</span><strong>{latestUpdate ? formatWhen(latestUpdate.at) : 'No updates yet'}</strong></div>
           </div>
+          {latestCounselorUpdate && (
+            <article className="callout counselor-student-update">
+              <p className="kicker">Latest counselor update</p>
+              <strong>{latestCounselorUpdate.author} · {latestCounselorUpdate.authorRole}</strong>
+              <p>{latestCounselorUpdate.message}</p>
+            </article>
+          )}
           {wellbeingCase && caze.assignedCounselor && caze.status === 'NEW' && (
             <p className="callout">
               Your request has been assigned to {caze.assignedCounselor.name}. You do not need to contact another office.
@@ -97,7 +105,7 @@ export default function StudentCase() {
         </section>
         <section className="card quiet">
           <p className="kicker">Timeline</p>
-          <Timeline events={caze.timeline} />
+          <Timeline events={publicEvents} />
           <p className="hint">Opened {formatWhen(caze.createdAt)}</p>
         </section>
       </div>

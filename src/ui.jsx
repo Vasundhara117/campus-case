@@ -122,7 +122,7 @@ export function Timeline({ events, staff }) {
         <li key={e.id}>
           <div className="when">
             {new Date(e.at).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-            {' · '}{staff ? e.actor : e.actorRole === 'Student' ? 'You' : 'Campus Case team'}{e.caseId ? ` · ${e.caseId}` : ''}
+            {' · '}{staff || e.type === 'COUNSELOR_UPDATE' ? e.actor : e.actorRole === 'Student' ? 'You' : 'Campus Case team'}{e.caseId ? ` · ${e.caseId}` : ''}
           </div>
           <h4>{e.title}{e.visibility === 'internal' ? ' · internal' : ''}</h4>
           <p>{e.body}</p>
