@@ -1,15 +1,41 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CATEGORY_ROUTING,
+  ATTENTION_THRESHOLD_MS,
   DEPARTMENTS,
   STORAGE_KEY,
-  STUDENT,
-  createSeedCases,
+  buildFallbackSummary,
   expectedFor,
+  getJourneyCases,
+  isAttentionRequired,
   nextCaseId,
 } from './data'
+import { addDocumentCaseReference, saveDocument } from './documentStore'
 
 const CampusContext = createContext(null)
+const RECENT_CASE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+const SESSION_KEY = `${STORAGE_KEY}-client-session`
+const NOTIFICATION_KEY = `${STORAGE_KEY}-notification`
+const INBOX_KEY = `${SESSION_KEY}-notifications`
+
+function loadNotifications() {
+  try {
+    const saved = sessionStorage.getItem(INBOX_KEY)
+    const parsed = saved ? JSON.parse(saved) : []
+    return Array.isArray(parsed) ? parsed : []
+  } catch (error) {
+    console.error('Unable to load this client notification center.', error)
+    return []
+  }
+}
+
+function normalizeWorkflowStatus(caze) {
+  if (caze.status === 'ASSIGNED') return { ...caze, status: 'IN PROGRESS' }
+  if (caze.status === 'INTERNAL COORDINATION') return { ...caze, status: 'COORDINATION REQUIRED' }
+  if (caze.status === 'WAITING FOR STUDENT') return { ...caze, status: 'IN PROGRESS' }
+  if (caze.status === 'ACTION COMPLETED') return { ...caze, status: 'UNDER REVIEW' }
+  return caze
+}
 
 function nowIso() {
   return new Date().toISOString()
@@ -27,202 +53,714 @@ function event(partial) {
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return { cases: createSeedCases(), session: null }
-    const parsed = JSON.parse(raw)
+    const parsed = raw ? JSON.parse(raw) : {}
+    const cases = Array.isArray(parsed.cases) ? parsed.cases : []
     return {
-      cases: parsed.cases?.length ? parsed.cases : createSeedCases(),
-      session: parsed.session || null,
+      revision: parsed.revision || { time: 0, clientId: '' },
+      cases: cases.map((rawCase) => {
+        const caze = normalizeWorkflowStatus(rawCase)
+        const updatedAt = new Date(caze.updatedAt).getTime()
+        const notifiedAt = new Date(caze.attentionNotifiedAt || 0).getTime()
+        const prematureAttention = (caze.timeline || []).some((item) =>
+          item.type === 'attention' &&
+          new Date(item.at).getTime() - updatedAt < ATTENTION_THRESHOLD_MS,
+        )
+        const prematureNotice = Number.isFinite(notifiedAt) &&
+          notifiedAt > 0 &&
+          notifiedAt - updatedAt < ATTENTION_THRESHOLD_MS
+        if (!prematureAttention && !prematureNotice) return caze
+        return {
+          ...caze,
+          attentionNotifiedAt: undefined,
+          timeline: caze.timeline.filter((item) =>
+            item.type !== 'attention' ||
+            new Date(item.at).getTime() - updatedAt >= ATTENTION_THRESHOLD_MS,
+          ),
+        }
+      }),
     }
-  } catch {
-    return { cases: createSeedCases(), session: null }
+  } catch (error) {
+    console.error('Unable to load the saved Campus Case data.', error)
+    return { cases: [], revision: { time: 0, clientId: '' } }
   }
+}
+
+function addDepartmentAccess(caze, department, reason, at) {
+  const involvedDepartments = caze.involvedDepartments.includes(department)
+    ? caze.involvedDepartments
+    : [...caze.involvedDepartments, department]
+  const accessGrants = caze.accessGrants.some((grant) => grant.department === department)
+    ? caze.accessGrants
+    : [...caze.accessGrants, { department, reason, grantedAt: at }]
+  return { ...caze, involvedDepartments, accessGrants }
 }
 
 export function CampusProvider({ children }) {
   const initial = loadState()
-  const [cases, setCases] = useState(initial.cases)
-  const [session, setSession] = useState(initial.session)
+  const [cases, setCasesState] = useState(initial.cases)
+  const [session, setSession] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(SESSION_KEY)
+      return saved ? JSON.parse(saved) : null
+    } catch (error) {
+      console.error('Unable to load this client session.', error)
+      return null
+    }
+  })
   const [toasts, setToasts] = useState([])
+  const [notifications, setNotifications] = useState(loadNotifications)
+  const clientId = useRef(crypto.randomUUID())
+  const channelRef = useRef(null)
+  const seenNotifications = useRef(new Set(notifications.map((notification) => notification.id)))
+  const casesRef = useRef(initial.cases)
+  const revisionRef = useRef(initial.revision)
+  const unreadNotifications = notifications.filter((notification) => !notification.readAt).length
+
+  const setCases = (nextOrUpdater, { broadcast = true } = {}) => {
+    const previous = casesRef.current
+    const next = typeof nextOrUpdater === 'function' ? nextOrUpdater(previous) : nextOrUpdater
+    if (next === previous) return
+    casesRef.current = next
+    setCasesState(next)
+
+    const revision = {
+      time: Math.max(Date.now(), revisionRef.current.time + 1),
+      clientId: clientId.current,
+    }
+    revisionRef.current = revision
+    const stateUpdate = {
+      type: 'shared-state',
+      sourceClient: clientId.current,
+      revision,
+      cases: next,
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ cases: next, revision }))
+    } catch (error) {
+      console.error('Unable to persist shared Campus Case data.', error)
+    }
+    if (broadcast) channelRef.current?.postMessage(stateUpdate)
+  }
+
+  const receiveSharedState = (incoming, sourceClient) => {
+    if (!Array.isArray(incoming?.cases) || sourceClient === clientId.current) return
+    const revision = incoming.revision || { time: Date.now(), clientId: 'legacy' }
+    const currentRevision = revisionRef.current
+    const newer = revision.time > currentRevision.time ||
+      (revision.time === currentRevision.time && revision.clientId > currentRevision.clientId)
+    if (!newer) return
+    revisionRef.current = revision
+    casesRef.current = incoming.cases
+    setCasesState(incoming.cases)
+  }
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ cases, session }))
-  }, [cases, session])
+    const channel = typeof BroadcastChannel === 'undefined'
+      ? null
+      : new BroadcastChannel(`${STORAGE_KEY}-events`)
+    channelRef.current = channel
+    if (channel) {
+      channel.onmessage = (message) => {
+        const data = message.data
+        if (data?.type === 'shared-state') {
+          receiveSharedState(data, data.sourceClient)
+          return
+        }
+        onNotification(data)
+      }
+    }
+    const onStorage = (storageEvent) => {
+      if (storageEvent.key === STORAGE_KEY && storageEvent.newValue) {
+        try {
+          const incoming = JSON.parse(storageEvent.newValue)
+          receiveSharedState(incoming, incoming.sourceClient)
+        } catch (error) {
+          console.error('Unable to synchronize shared case data.', error)
+        }
+      }
+      if (storageEvent.key === NOTIFICATION_KEY && storageEvent.newValue) {
+        try {
+          onNotification(JSON.parse(storageEvent.newValue))
+        } catch (error) {
+          console.error('Unable to read a live notification.', error)
+        }
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      channel?.close()
+      channelRef.current = null
+    }
+  }, [session])
+
+  useEffect(() => {
+    try {
+      if (session) sessionStorage.setItem(SESSION_KEY, JSON.stringify(session))
+      else sessionStorage.removeItem(SESSION_KEY)
+    } catch (error) {
+      console.error('Unable to persist this client session.', error)
+    }
+  }, [session])
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(INBOX_KEY, JSON.stringify(notifications.slice(-100)))
+    } catch (error) {
+      console.error('Unable to persist this client notification center.', error)
+    }
+  }, [notifications])
+
+  const addToast = (toast) => {
+    if (toast.id && seenNotifications.current.has(toast.id)) return
+    if (toast.id) {
+      seenNotifications.current.add(toast.id)
+      setNotifications((current) => [...current, { ...toast, readAt: null }].slice(-100))
+    }
+    const id = toast.id || crypto.randomUUID()
+    setToasts((current) => [...current, { ...toast, id }])
+    setTimeout(() => setToasts((current) => current.filter((item) => item.id !== id)), toast.id ? 5500 : 4200)
+  }
+
+  const onNotification = (notification) => {
+    if (!notification || notification.sourceClient === clientId.current) return
+    if (notification.recipientRole && notification.recipientRole !== session?.role) return
+    if (notification.recipientDepartment && notification.recipientDepartment !== session?.department) return
+    if (notification.recipientStudentId &&
+        notification.recipientStudentId.toLocaleUpperCase() !== session?.studentId?.toLocaleUpperCase()) return
+    addToast(notification)
+  }
+
+  const notify = (details) => {
+    const eventId = crypto.randomUUID()
+    const notification = {
+      id: eventId,
+      eventId,
+      eventType: details.eventType || 'CASE_EVENT',
+      createdAt: nowIso(),
+      sourceClient: clientId.current,
+      sourceRole: session?.role,
+      sourceDepartment: session?.department || null,
+      ...details,
+    }
+    channelRef.current?.postMessage(notification)
+    try {
+      localStorage.setItem(NOTIFICATION_KEY, JSON.stringify(notification))
+    } catch (error) {
+      console.error('Unable to publish a live notification.', error)
+    }
+  }
+
+  useEffect(() => {
+    const checkAttention = () => {
+      const now = Date.now()
+      setCases((current) => {
+        let changed = false
+        const checked = current.map((caze) => {
+          if (!isAttentionRequired(caze, now)) return caze
+          const updatedAt = new Date(caze.updatedAt).getTime()
+          const notifiedAt = new Date(caze.attentionNotifiedAt || 0).getTime()
+          if (Number.isFinite(notifiedAt) && notifiedAt >= updatedAt) return caze
+          changed = true
+          const at = new Date(now).toISOString()
+          return {
+            ...caze,
+            attentionNotifiedAt: at,
+            timeline: [
+              ...caze.timeline,
+              event({
+                at,
+                actor: 'Campus Case',
+                actorRole: 'Attention signal',
+                type: 'attention',
+                title: 'Attention required',
+                body: 'This case has had no update within the configured attention window.',
+                visibility: 'internal',
+              }),
+            ],
+          }
+        })
+        return changed ? checked : current
+      })
+    }
+    checkAttention()
+    const timer = setInterval(checkAttention, 30 * 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   const toast = (message) => {
-    const id = crypto.randomUUID()
-    setToasts((t) => [...t, { id, message }])
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200)
+    addToast({ message })
+  }
+
+  const clearUnreadNotifications = () => {
+    const readAt = nowIso()
+    setNotifications((current) => current.map((notification) =>
+      notification.readAt ? notification : { ...notification, readAt },
+    ))
+  }
+
+  const markNotificationRead = (id) => {
+    const readAt = nowIso()
+    setNotifications((current) => current.map((notification) =>
+      notification.id === id && !notification.readAt ? { ...notification, readAt } : notification,
+    ))
   }
 
   const updateCase = (id, updater) => {
-    setCases((prev) => prev.map((c) => (c.id === id ? updater(c) : c)))
+    setCases((previous) => {
+      let changed = false
+      const updated = previous.map((caze) => {
+        if (caze.id !== id || caze.status === 'RESOLVED') return caze
+        const next = updater(caze)
+        if (next !== caze) changed = true
+        return next
+      })
+      return changed ? updated : previous
+    })
   }
 
-  const loginStudent = () => {
-    setSession({ role: 'student', ...STUDENT })
-    toast(`Signed in as ${STUDENT.name}`)
+  const loginStudent = (profile) => {
+    const student = {
+      role: 'student',
+      studentId: profile.studentId.trim(),
+      name: profile.studentName.trim(),
+      programme: profile.studentProgramme.trim(),
+    }
+    setSession(student)
+    toast(`Signed in as ${student.name}`)
   }
 
   const loginStaff = (departmentId) => {
-    const dept = DEPARTMENTS.find((d) => d.id === departmentId)
+    const department = DEPARTMENTS.find((item) => item.id === departmentId)
+    if (!department) {
+      toast('Choose a valid department to continue')
+      return
+    }
     setSession({
       role: 'staff',
-      departmentId: dept.id,
-      department: dept.name,
-      name: dept.staffName,
-      title: dept.title,
+      departmentId: department.id,
+      department: department.name,
+      name: department.staffName,
+      title: department.title,
     })
-    toast(`Signed in to ${dept.name}`)
+    toast(`Signed in to ${department.name}`)
   }
 
   const logout = () => setSession(null)
 
   const resetDemo = () => {
-    setCases(createSeedCases())
-    toast('Demo reset. CC-1042 is a new attendance case again.')
+    setCases([])
+    setSession(null)
+    toast('All cases and the current session cleared. Start a new student journey.')
   }
 
-  const createCase = (payload) => {
-    const assignedDepartment = CATEGORY_ROUTING[payload.category] || 'Student Support Hub'
-    const id = nextCaseId(cases)
-    const createdAt = nowIso()
-    const next = {
-      id,
-      studentId: STUDENT.id,
-      studentName: STUDENT.name,
-      studentProgramme: STUDENT.programme,
-      category: payload.category,
-      title: payload.title,
-      description: payload.description,
-      helpNeeded: payload.helpNeeded,
-      documents: payload.documents || [],
-      status: 'NEW',
-      assignedDepartment,
-      owner: null,
-      nextAction: `${assignedDepartment} to assign an owner and review the request.`,
-      expectedResponse: expectedFor('NEW'),
-      createdAt,
-      updatedAt: createdAt,
-      involvedDepartments: [assignedDepartment],
-      accessGrants: [],
-      waitingOnStudent: null,
-      internalTasks: [],
-      timeline: [
+  const createCase = async (payload) => {
+    const studentId = payload.studentId.trim()
+    const studentKey = studentId.toLocaleUpperCase()
+    const defaultDepartment = CATEGORY_ROUTING[payload.issueCategory] || 'Student Support Hub'
+    const departments = [...new Set(payload.departments?.length ? payload.departments : [defaultDepartment])]
+    const uploadedDocuments = await Promise.all((payload.documents || []).map(saveDocument))
+    let nextCases = casesRef.current
+    const submissions = []
+    const notifications = []
+
+    for (const assignedDepartment of departments) {
+      const createdAt = nowIso()
+      const eligibleCases = nextCases
+        .filter((caze) => caze.studentId.trim().toLocaleUpperCase() === studentKey)
+        .filter((caze) => caze.status !== 'RESOLVED' || Date.now() - new Date(caze.createdAt).getTime() <= RECENT_CASE_WINDOW_MS)
+        .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))
+      const duplicate = eligibleCases.find(
+        (caze) => caze.assignedDepartment === assignedDepartment && caze.status !== 'RESOLVED',
+      )
+
+      if (duplicate) {
+        const documents = uploadedDocuments.map((document) => ({ ...document, caseId: duplicate.id }))
+        await Promise.all(documents.map((document) => addDocumentCaseReference(document.storageRef, duplicate.id)))
+        const updatedDuplicate = {
+          ...duplicate,
+          description: `${duplicate.description}\n\nAdditional information: ${payload.description}`,
+          helpNeeded: payload.helpNeeded || duplicate.helpNeeded,
+          documents: [...(duplicate.documents || []), ...documents],
+          updatedAt: createdAt,
+          timeline: [
+            ...duplicate.timeline,
+            event({
+              at: createdAt,
+              actor: payload.studentName,
+              actorRole: 'Student',
+              type: 'duplicate-intake',
+              title: 'Additional information received',
+              body: `The student submitted another request for ${assignedDepartment}; it has been added to the existing departmental case.`,
+            }),
+          ],
+        }
+        nextCases = nextCases.map((caze) => caze.id === duplicate.id ? updatedDuplicate : caze)
+        submissions.push({ ...updatedDuplicate, isDuplicate: true })
+        notifications.push({
+          eventType: 'CASE_UPDATED',
+          title: 'Student case updated',
+          message: `New information was added to case ${duplicate.id}.`,
+          recipientRole: 'staff',
+          recipientDepartment: assignedDepartment,
+          caseId: duplicate.id,
+          actionHref: `/staff/cases/${duplicate.id}`,
+        })
+        continue
+      }
+
+      const previousCase = eligibleCases.find((caze) => caze.assignedDepartment !== assignedDepartment)
+      const rootId = previousCase ? (previousCase.parentCaseReference || previousCase.id) : null
+      const rootCase = rootId ? nextCases.find((caze) => caze.id === rootId) : null
+      const id = nextCaseId(nextCases)
+      const timeline = [
         event({
           at: createdAt,
-          actor: STUDENT.name,
+          actor: payload.studentName,
           actorRole: 'Student',
-          type: 'submitted',
+          type: 'CASE_CREATED',
           title: 'Case submitted',
-          body: `Automatically routed to ${assignedDepartment}. You do not need to visit another office.`,
+          body: `Automatically routed to ${assignedDepartment}. The university will coordinate internally if another team is needed.`,
         }),
-      ],
+      ]
+      if (rootCase) {
+        timeline.push(event({
+          at: createdAt,
+          actor: 'Campus Case',
+          actorRole: 'Joined-up case management',
+          type: 'case-linked',
+          title: 'Connected to the existing student journey',
+          body: `Linked to ${rootCase.id} (${rootCase.assignedDepartment}) using the matching student ID. Relevant context is carried forward.`,
+        }))
+      }
+
+      const caze = {
+        id,
+        studentId,
+        studentName: payload.studentName.trim(),
+        studentProgramme: payload.studentProgramme.trim(),
+        department: assignedDepartment,
+        issueCategory: payload.issueCategory,
+        title: payload.title.trim(),
+        description: payload.description.trim(),
+        helpNeeded: (payload.helpNeeded || '').trim(),
+        documents: uploadedDocuments.map((document) => ({ ...document, caseId: id })),
+        parentCaseReference: rootCase?.id || null,
+        status: 'NEW',
+        priority: 'MEDIUM',
+        aiSummary: '',
+        patternFlagCount: 0,
+        owner: null,
+        assignedDepartment,
+        nextAction: `${assignedDepartment} to triage and start working on the request.`,
+        expectedResponse: expectedFor('NEW'),
+        createdAt,
+        updatedAt: createdAt,
+        internalTasks: [],
+        timeline,
+        involvedDepartments: [assignedDepartment],
+        accessGrants: [],
+        waitingOnStudent: null,
+        outcomeVerified: false,
+        outcomeVerification: '',
+      }
+      const currentJourney = rootCase ? getJourneyCases(nextCases, rootCase) : []
+      const journeyDepartments = [...new Set([
+        ...currentJourney.flatMap((item) => [item.assignedDepartment, ...(item.involvedDepartments || [])]),
+        assignedDepartment,
+      ])]
+      caze.involvedDepartments = journeyDepartments
+      caze.accessGrants = journeyDepartments
+        .filter((department) => department !== assignedDepartment)
+        .map((department) => ({
+          department,
+          reason: `Shared context for connected student journey ${rootCase.id}`,
+          grantedAt: createdAt,
+        }))
+      caze.aiSummary = buildFallbackSummary(caze, [...currentJourney, caze])
+      const connectedIds = new Set(currentJourney.map((item) => item.id))
+
+      nextCases = [
+        caze,
+        ...nextCases.map((existing) => {
+          if (!connectedIds.has(existing.id)) return existing
+          let connected = existing
+          for (const department of journeyDepartments) {
+            if (department !== connected.assignedDepartment) {
+              connected = addDepartmentAccess(
+                connected,
+                department,
+                `Shared context for connected student journey ${rootCase.id}`,
+                createdAt,
+              )
+            }
+          }
+          if (existing.id === rootCase.id) {
+            connected = {
+              ...connected,
+              updatedAt: createdAt,
+              timeline: [
+                ...connected.timeline,
+                event({
+                  at: createdAt,
+                  actor: 'Campus Case',
+                  actorRole: 'Joined-up case management',
+                  type: 'case-linked',
+                  title: 'A department joined this student journey',
+                  body: `${id} was linked from ${assignedDepartment}. The student ID matched an existing case in this journey.`,
+                }),
+              ],
+            }
+          }
+          return connected
+        }),
+      ]
+      submissions.push(caze)
+      await Promise.all(caze.documents.map((document) =>
+        addDocumentCaseReference(document.storageRef, id),
+      ))
+      notifications.push({
+        eventType: 'CASE_CREATED',
+        title: 'New case received',
+        message: `A new ${payload.issueCategory} case ${id} has been submitted to ${assignedDepartment}. Review the case and start triage.`,
+        recipientRole: 'staff',
+        recipientDepartment: assignedDepartment,
+        caseId: id,
+        actionHref: `/staff/cases/${id}`,
+      })
     }
-    setCases((prev) => [next, ...prev])
-    toast(`Case ${id} created and routed to ${assignedDepartment}`)
-    return next
+
+    setCases(nextCases)
+    notifications.forEach(notify)
+    const created = submissions[0]
+    const result = { ...created, createdCases: submissions }
+    toast(submissions.length > 1
+      ? `${submissions.length} department requests added to the student journey`
+      : created.isDuplicate
+        ? `Added to existing case ${created.id} for ${created.assignedDepartment}`
+        : created.parentCaseReference
+          ? `Case ${created.id} linked to journey ${created.parentCaseReference}`
+          : `Case ${created.id} created and routed to ${created.assignedDepartment}`)
+    return result
   }
 
-  const studentRespond = (id, { message, documents }) => {
-    updateCase(id, (c) => ({
-      ...c,
-      status: 'UNDER REVIEW',
+  const studentRespond = async (id, { message, documents }) => {
+    const caze = casesRef.current.find((item) => item.id === id)
+    if (!caze || !caze.waitingOnStudent || caze.status === 'RESOLVED') return
+    const uploadedDocuments = await Promise.all((documents || []).map(saveDocument))
+    const linkedDocuments = uploadedDocuments.map((document) => ({ ...document, caseId: id }))
+    await Promise.all(linkedDocuments.map((document) =>
+      addDocumentCaseReference(document.storageRef, id),
+    ))
+    updateCase(id, (caze) => ({
+      ...caze,
+      status: caze.status === 'COORDINATION REQUIRED' ? caze.status : 'IN PROGRESS',
       waitingOnStudent: null,
-      documents: [...(c.documents || []), ...(documents || [])],
-      nextAction: `${c.assignedDepartment} to continue review.`,
-      expectedResponse: expectedFor('UNDER REVIEW'),
+      documents: [...(caze.documents || []), ...linkedDocuments],
+      nextAction: `${caze.assignedDepartment} to continue review.`,
+      expectedResponse: expectedFor('IN PROGRESS'),
       updatedAt: nowIso(),
       timeline: [
-        ...c.timeline,
+        ...caze.timeline,
         event({
-          actor: STUDENT.name,
+          actor: session.name,
           actorRole: 'Student',
-          type: 'reply',
+          type: 'STUDENT_RESPONDED',
           title: 'Student responded',
-          body: message,
+          body: message || (linkedDocuments.length ? 'The student uploaded a requested document.' : 'The student responded to the request.'),
         }),
+        ...linkedDocuments.map((document) => event({
+          actor: session.name,
+          actorRole: 'Student',
+          type: 'DOCUMENT_UPLOADED',
+          title: 'Document uploaded',
+          body: `The student uploaded ${document.name}.`,
+        })),
       ],
     }))
+    notify({
+      eventType: 'STUDENT_RESPONDED',
+      title: 'Student responded',
+      message: `The student added information to case ${id}. Review the updated timeline and continue the case.`,
+      recipientRole: 'staff',
+      recipientDepartment: caze.assignedDepartment,
+      caseId: id,
+      actionHref: `/staff/cases/${id}`,
+    })
+    for (const document of linkedDocuments) {
+      for (const department of new Set([caze.assignedDepartment, ...caze.involvedDepartments])) {
+        notify({
+          eventType: 'DOCUMENT_UPLOADED',
+          title: 'Document received',
+          message: `The student uploaded ${document.name} to case ${id}. Review the document in the case record.`,
+          recipientRole: 'staff',
+          recipientDepartment: department,
+          caseId: id,
+          actionHref: `/staff/cases/${id}`,
+        })
+      }
+    }
     toast('Your response was added to the case')
   }
 
-  const assignOwner = (id, ownerName) => {
-    const dept = session?.department
-    updateCase(id, (c) => ({
-      ...c,
-      owner: { name: ownerName, department: dept },
-      status: c.status === 'NEW' ? 'ASSIGNED' : c.status,
-      nextAction: `${ownerName} is reviewing the case.`,
-      expectedResponse: expectedFor(c.status === 'NEW' ? 'ASSIGNED' : c.status),
-      updatedAt: nowIso(),
-      timeline: [
-        ...c.timeline,
-        event({
-          actor: ownerName,
-          actorRole: dept,
-          type: 'owner',
-          title: 'Owner assigned',
-          body: `${ownerName} (${dept}) is the named lead.`,
-        }),
-      ],
+  const startCase = (id) => {
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status !== 'NEW') return false
+    const at = nowIso()
+    updateCase(id, (caze) => ({
+      ...caze,
+      owner: { name: session.name, department: session.department },
+      status: 'IN PROGRESS',
+      nextAction: `${session.name} is reviewing the request.`,
+      expectedResponse: expectedFor('IN PROGRESS'),
+      updatedAt: at,
+      timeline: [...caze.timeline, event({
+        at,
+        actor: session.name,
+        actorRole: session.department,
+        type: 'CASE_STARTED',
+        title: 'Case started',
+        body: `${session.name} started working on this case.`,
+      })],
     }))
-    toast('Case owner assigned')
+    notify({
+      eventType: 'CASE_STARTED',
+      title: 'Case update',
+      message: `${session.name} started working on your case ${id}.`,
+      recipientRole: 'student',
+      recipientStudentId: target.studentId,
+      caseId: id,
+      actionHref: `/student/cases/${id}`,
+    })
+    return true
   }
 
-  const changeStatus = (id, status) => {
-    updateCase(id, (c) => ({
-      ...c,
-      status,
-      expectedResponse: expectedFor(status),
-      nextAction:
-        status === 'RESOLVED'
-          ? 'None — case closed.'
-          : status === 'WAITING FOR STUDENT'
-            ? 'Waiting for the student to reply.'
-            : c.nextAction,
+  const moveToUnderReview = (id) => {
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status === 'RESOLVED') return false
+    if (!['IN PROGRESS', 'COORDINATION REQUIRED'].includes(target.status)) return false
+    if (target.internalTasks.some((task) => task.status === 'open')) {
+      toast('Complete the open coordination task before moving this case to review.')
+      return false
+    }
+    const at = nowIso()
+    updateCase(id, (caze) => ({
+      ...caze,
+      status: 'UNDER REVIEW',
+      outcomeVerified: false,
+      nextAction: `${session.department} to verify the outcome before resolution.`,
+      expectedResponse: expectedFor('UNDER REVIEW'),
+      updatedAt: at,
+      timeline: [...caze.timeline, event({
+        at,
+        actor: session.name,
+        actorRole: session.department,
+        type: 'CASE_MOVED_TO_REVIEW',
+        title: 'Case moved to under review',
+        body: `${session.department} is reviewing the work completed before resolving the case.`,
+      })],
+    }))
+    notify({
+      eventType: 'CASE_MOVED_TO_REVIEW',
+      title: 'Case under review',
+      message: `${session.department} moved case ${id} to under review and is verifying the outcome.`,
+      recipientRole: 'student',
+      recipientStudentId: target.studentId,
+      caseId: id,
+      actionHref: `/student/cases/${id}`,
+    })
+    return true
+  }
+
+  const verifyOutcome = (id, detail) => {
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status !== 'UNDER REVIEW' || target.outcomeVerified) return false
+    const at = nowIso()
+    updateCase(id, (caze) => ({
+      ...caze,
+      outcomeVerified: true,
+      outcomeVerification: detail.trim(),
+      nextAction: 'Outcome verified. The owning department can resolve the case.',
+      updatedAt: at,
+      timeline: [...caze.timeline, event({
+        at,
+        actor: session.name,
+        actorRole: session.department,
+        type: 'OUTCOME_VERIFIED',
+        title: 'Outcome verified',
+        body: detail.trim() || 'The owning department verified the outcome.',
+        visibility: 'internal',
+      })],
+    }))
+    return true
+  }
+
+  const changePriority = (id, priority) => {
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status === 'RESOLVED') return false
+    updateCase(id, (caze) => ({
+      ...caze,
+      priority,
       updatedAt: nowIso(),
       timeline: [
-        ...c.timeline,
+        ...caze.timeline,
         event({
           actor: session.name,
           actorRole: session.department,
-          type: 'status',
-          title: `Status changed to ${status.toLowerCase()}`,
-          body: `The case is now ${status}.`,
+          type: 'priority',
+          title: `Priority set to ${priority}`,
+          body: `Staff updated the case priority to ${priority}.`,
+          visibility: 'internal',
         }),
       ],
     }))
-    toast(`Status updated to ${status}`)
+    toast(`Priority updated to ${priority}`)
+    return true
   }
 
   const requestFromStudent = (id, message) => {
-    updateCase(id, (c) => ({
-      ...c,
-      status: 'WAITING FOR STUDENT',
-      waitingOnStudent: { message, requestedAt: nowIso() },
+    const target = casesRef.current.find((item) => item.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status !== 'IN PROGRESS') return false
+    const at = nowIso()
+    updateCase(id, (caze) => ({
+      ...caze,
+      waitingOnStudent: { message, requestedAt: at },
       nextAction: 'Waiting for the student to reply or upload a document.',
-      expectedResponse: expectedFor('WAITING FOR STUDENT'),
-      updatedAt: nowIso(),
+      expectedResponse: expectedFor('IN PROGRESS'),
+      updatedAt: at,
       timeline: [
-        ...c.timeline,
+        ...caze.timeline,
         event({
+          at,
           actor: session.name,
           actorRole: session.department,
-          type: 'request',
+          type: 'INFO_REQUESTED',
           title: 'Information requested from student',
           body: message,
         }),
       ],
     }))
+    notify({
+      eventType: 'INFO_REQUESTED',
+      title: 'Information requested',
+      message: `${session.department} needs additional information for case ${id}: ${message}`,
+      recipientRole: 'student',
+      recipientStudentId: target.studentId,
+      caseId: id,
+      actionHref: `/student/cases/${id}`,
+    })
     toast('Request sent to the student inside this case')
+    return true
   }
 
   const addInternalNote = (id, body) => {
-    updateCase(id, (c) => ({
-      ...c,
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status !== 'IN PROGRESS') return false
+    updateCase(id, (caze) => ({
+      ...caze,
       updatedAt: nowIso(),
       timeline: [
-        ...c.timeline,
+        ...caze.timeline,
         event({
           actor: session.name,
           actorRole: session.department,
@@ -234,133 +772,227 @@ export function CampusProvider({ children }) {
       ],
     }))
     toast('Internal note added — the student cannot see this')
+    return true
   }
 
   const createInternalTask = (id, { toDepartment, title, detail }) => {
-    updateCase(id, (c) => {
-      const grants = c.accessGrants.some((g) => g.department === toDepartment)
-        ? c.accessGrants
-        : [
-            ...c.accessGrants,
-            {
-              department: toDepartment,
-              reason: `Need-to-know: ${title}`,
-              grantedAt: nowIso(),
-            },
-          ]
-      const involved = c.involvedDepartments.includes(toDepartment)
-        ? c.involvedDepartments
-        : [...c.involvedDepartments, toDepartment]
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.assignedDepartment !== session?.department || target.status !== 'IN PROGRESS' ||
+        !DEPARTMENTS.some((department) => department.name === toDepartment && department.name !== session.department)) {
+      toast('Only the owning department can coordinate a case that is in progress.')
+      return false
+    }
+    const at = nowIso()
+    const task = {
+      id: crypto.randomUUID(),
+      caseId: id,
+      from: session.department,
+      to: toDepartment,
+      title: title.trim(),
+      detail: detail.trim(),
+      status: 'open',
+      createdAt: at,
+      journeyRootId: cases.find((caze) => caze.id === id)?.parentCaseReference || id,
+    }
+    const journeyIds = new Set(getJourneyCases(casesRef.current, target).map((caze) => caze.id))
+    setCases((previous) => previous.map((caze) => {
+      if (!journeyIds.has(caze.id)) return caze
+      const connected = addDepartmentAccess(
+        caze,
+        toDepartment,
+        `Assigned an internal task: ${task.title}`,
+        at,
+      )
+      if (caze.id !== id) return connected
       return {
-        ...c,
-        status: 'INTERNAL COORDINATION',
-        involvedDepartments: involved,
-        accessGrants: grants,
-        nextAction: `${toDepartment} to complete an internal task. Student is not asked to visit them.`,
-        expectedResponse: expectedFor('INTERNAL COORDINATION'),
-        updatedAt: nowIso(),
-        internalTasks: [
-          ...c.internalTasks,
-          {
-            id: crypto.randomUUID(),
-            from: session.department,
-            to: toDepartment,
-            title,
-            detail,
-            status: 'open',
-            createdAt: nowIso(),
-          },
-        ],
+        ...connected,
+        status: 'COORDINATION REQUIRED',
+        nextAction: `${toDepartment} to complete an internal task. The student does not need to visit another office.`,
+        expectedResponse: expectedFor('COORDINATION REQUIRED'),
+        updatedAt: at,
+        internalTasks: [...caze.internalTasks, task],
         timeline: [
-          ...c.timeline,
+          ...caze.timeline,
           event({
+            at,
             actor: session.name,
             actorRole: session.department,
-            type: 'coordinate',
+            type: 'COORDINATION_STARTED',
             title: 'Internal coordination started',
-            body: `${toDepartment} has been asked to help inside this case. You do not need to visit another office.`,
+            body: `${toDepartment} has been asked to help inside this case. The student does not need to visit another office.`,
           }),
           event({
+            at,
             actor: session.name,
             actorRole: session.department,
-            type: 'task',
+            type: 'COORDINATION_TASK_CREATED',
             title: `Internal task for ${toDepartment}`,
             body: title,
             visibility: 'internal',
           }),
         ],
       }
+    }))
+    notify({
+      eventType: 'COORDINATION_TASK_CREATED',
+      title: 'New coordination task',
+      message: `${session.department} asked ${toDepartment} to help with ${target.issueCategory.toLowerCase()} case ${id}: ${title.trim().replace(/[.!?]+$/, '')}.`,
+      recipientRole: 'staff',
+      recipientDepartment: toDepartment,
+      caseId: id,
+      actionHref: `/staff/cases/${id}`,
+    })
+    notify({
+      eventType: 'COORDINATION_STARTED',
+      title: 'University coordination',
+      message: `${session.department} has started internal coordination for case ${id}. You do not need to visit another office.`,
+      recipientRole: 'student',
+      recipientStudentId: target.studentId,
+      caseId: id,
+      actionHref: `/student/cases/${id}`,
     })
     toast(`Internal task created for ${toDepartment}`)
+    return true
   }
 
   const completeTask = (caseId, taskId, note) => {
-    updateCase(caseId, (c) => ({
-      ...c,
-      status: 'UNDER REVIEW',
-      nextAction: `${c.assignedDepartment} to apply the verified outcome.`,
-      expectedResponse: expectedFor('UNDER REVIEW'),
-      updatedAt: nowIso(),
-      internalTasks: c.internalTasks.map((t) =>
-        t.id === taskId ? { ...t, status: 'done', completedAt: nowIso(), completionNote: note } : t,
-      ),
-      timeline: [
-        ...c.timeline,
-        event({
-          actor: session.name,
-          actorRole: session.department,
-          type: 'task-done',
-          title: 'Internal task completed',
-          body: note,
-          visibility: 'internal',
-        }),
-        event({
-          actor: session.name,
-          actorRole: session.department,
-          type: 'coordinate',
-          title: 'Internal verification complete',
-          body: 'Another university team confirmed details on this case. You still do not need to visit another office.',
-        }),
-      ],
-    }))
+    const source = casesRef.current.find((caze) => caze.id === caseId)
+    const task = source?.internalTasks.find((item) => item.id === taskId)
+    if (!source || source.status !== 'COORDINATION REQUIRED' || !task || task.status !== 'open') {
+      toast('This internal task is missing or has already been completed.')
+      return false
+    }
+    if (task.to !== session?.department) {
+      toast(`Only ${task.to} can complete this internal task.`)
+      return false
+    }
+
+    const at = nowIso()
+    setCases((previous) => {
+      const current = previous.find((caze) => caze.id === caseId)
+      const currentTask = current?.internalTasks.find((item) => item.id === taskId)
+      if (!current || !currentTask || currentTask.status !== 'open') return previous
+      return previous.map((caze) => caze.id === caseId
+        ? {
+            ...caze,
+            status: 'COORDINATION REQUIRED',
+            nextAction: `${caze.assignedDepartment} to review the completed coordination task.`,
+            updatedAt: at,
+            internalTasks: caze.internalTasks.map((item) => item.id === taskId
+              ? { ...item, status: 'done', completedAt: at, completionNote: note.trim() }
+              : item),
+            timeline: [
+              ...caze.timeline,
+              ...(note.trim()
+                ? [event({
+                    at,
+                    actor: session.name,
+                    actorRole: session.department,
+                    type: 'task-done-note',
+                    title: 'Internal task completion note',
+                    body: note.trim(),
+                    visibility: 'internal',
+                  })]
+                : []),
+              event({
+                at,
+                actor: session.name,
+                actorRole: session.department,
+                type: 'COORDINATION_COMPLETED',
+                title: 'Internal verification completed',
+                body: `${session.department} completed the assigned internal task.`,
+                visibility: 'internal',
+              }),
+              event({
+                at,
+                actor: session.name,
+                actorRole: session.department,
+                type: 'COORDINATION_UPDATED',
+                title: 'University coordination updated',
+                body: 'The university team has completed its internal step. The owning department will continue your case.',
+              }),
+            ],
+          }
+        : caze)
+    })
+    notify({
+      eventType: 'COORDINATION_COMPLETED',
+      title: 'Coordination complete',
+      message: `${session.department} completed the requested verification for ${caseId}. Review the result and decide the next case action.`,
+      recipientRole: 'staff',
+      recipientDepartment: source.assignedDepartment,
+      caseId,
+      actionHref: `/staff/cases/${caseId}`,
+    })
     toast('Internal task completed')
+    return true
   }
 
   const resolveCase = (id, outcome) => {
-    updateCase(id, (c) => ({
-      ...c,
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target) {
+      toast('This case could not be found.')
+      return false
+    }
+    if (target.assignedDepartment !== session?.department) {
+      toast(`Only ${target.assignedDepartment} can resolve this case.`)
+      return false
+    }
+    if (target.status === 'RESOLVED') {
+      toast('This case is already resolved.')
+      return false
+    }
+    if (target.status !== 'UNDER REVIEW' || !target.outcomeVerified) {
+      toast('Move the case to under review and verify the outcome before resolving it.')
+      return false
+    }
+    if (target.internalTasks.some((task) => task.status === 'open')) {
+      toast('Complete the open coordination task before resolving this case.')
+      return false
+    }
+    const at = nowIso()
+    updateCase(id, (caze) => ({
+      ...caze,
       status: 'RESOLVED',
       nextAction: 'None — case closed.',
-      expectedResponse: 'Complete',
-      updatedAt: nowIso(),
+      expectedResponse: expectedFor('RESOLVED'),
+      updatedAt: at,
       timeline: [
-        ...c.timeline,
+        ...caze.timeline,
         event({
+          at,
           actor: session.name,
           actorRole: session.department,
-          type: 'resolved',
+          type: 'CASE_RESOLVED',
           title: 'Case resolved',
-          body: outcome,
+          body: outcome || caze.outcomeVerification || 'The requested action has been completed.',
         }),
       ],
     }))
+    notify({
+      eventType: 'CASE_RESOLVED',
+      title: 'Case resolved',
+      message: `Your case ${id} has been resolved by ${session.department}. ${outcome || target.outcomeVerification || 'The requested action has been completed.'}`,
+      recipientRole: 'student',
+      recipientStudentId: target.studentId,
+      caseId: id,
+      actionHref: `/student/cases/${id}`,
+    })
     toast('Case resolved')
+    return true
   }
 
   const grantAccess = (id, department, reason) => {
-    updateCase(id, (c) => ({
-      ...c,
-      involvedDepartments: c.involvedDepartments.includes(department)
-        ? c.involvedDepartments
-        : [...c.involvedDepartments, department],
-      accessGrants: [
-        ...c.accessGrants,
-        { department, reason, grantedAt: nowIso() },
-      ],
-      updatedAt: nowIso(),
+    const target = casesRef.current.find((caze) => caze.id === id)
+    if (!target || target.status === 'RESOLVED' || target.assignedDepartment !== session?.department) return false
+    const at = nowIso()
+    updateCase(id, (caze) => ({
+      ...addDepartmentAccess(caze, department, reason, at),
+      updatedAt: at,
       timeline: [
-        ...c.timeline,
+        ...caze.timeline,
         event({
+          at,
           actor: session.name,
           actorRole: session.department,
           type: 'access',
@@ -371,6 +1003,7 @@ export function CampusProvider({ children }) {
       ],
     }))
     toast(`${department} can now see this case`)
+    return true
   }
 
   const value = useMemo(
@@ -378,6 +1011,10 @@ export function CampusProvider({ children }) {
       cases,
       session,
       toasts,
+      notifications,
+      unreadNotifications,
+      clearUnreadNotifications,
+      markNotificationRead,
       toast,
       loginStudent,
       loginStaff,
@@ -385,8 +1022,10 @@ export function CampusProvider({ children }) {
       resetDemo,
       createCase,
       studentRespond,
-      assignOwner,
-      changeStatus,
+      startCase,
+      moveToUnderReview,
+      verifyOutcome,
+      changePriority,
       requestFromStudent,
       addInternalNote,
       createInternalTask,
@@ -394,7 +1033,7 @@ export function CampusProvider({ children }) {
       resolveCase,
       grantAccess,
     }),
-    [cases, session, toasts],
+    [cases, session, toasts, notifications, unreadNotifications],
   )
 
   return <CampusContext.Provider value={value}>{children}</CampusContext.Provider>

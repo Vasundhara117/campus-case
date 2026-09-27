@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
+import { useState } from 'react'
 import { useCampus } from './CampusContext.jsx'
-import { Header, Toasts } from './ui.jsx'
+import { Header, NotificationCenter, Toasts } from './ui.jsx'
 import Login from './pages/Login.jsx'
 import StudentHome from './pages/StudentHome.jsx'
 import CreateCase from './pages/CreateCase.jsx'
@@ -16,11 +17,35 @@ function Guard({ role, children }) {
 }
 
 export default function App() {
-  const { session, logout, resetDemo, toasts } = useCampus()
+  const {
+    session,
+    logout,
+    resetDemo,
+    toasts,
+    notifications,
+    unreadNotifications,
+    clearUnreadNotifications,
+    markNotificationRead,
+  } = useCampus()
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const toggleNotifications = () => {
+    if (!notificationsOpen) clearUnreadNotifications()
+    setNotificationsOpen(!notificationsOpen)
+  }
   return (
     <div className="app-shell">
       <a className="skip" href="#main">Skip to content</a>
-      <Header session={session} onLogout={logout} onReset={resetDemo} />
+      <Header
+        session={session}
+        onLogout={logout}
+        onReset={resetDemo}
+        unreadNotifications={unreadNotifications}
+        onNotifications={toggleNotifications}
+        notificationsOpen={notificationsOpen}
+      />
+      {notificationsOpen && (
+        <NotificationCenter notifications={notifications} onRead={markNotificationRead} />
+      )}
       <main id="main">
         <Routes>
           <Route path="/" element={<Login />} />
