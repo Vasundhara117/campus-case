@@ -53,7 +53,7 @@ export default function StaffHome() {
   const workload = counselorWorkload(cases, counselors)
   const assignedTasks = visible.flatMap((caze) =>
     (caze.internalTasks || [])
-      .filter((task) => task.to === session.department && task.status === 'open')
+      .filter((task) => task.to === session.department && task.status !== 'done')
       .map((task) => ({
         ...task,
         caseId: caze.id,
@@ -63,7 +63,8 @@ export default function StaffHome() {
   )
   const supporting = visible.filter((caze) =>
     caze.assignedDepartment !== session.department &&
-    (caze.accessGrants || []).some((grant) => grant.department === session.department),
+    (caze.accessGrants || []).some((grant) => grant.department === session.department) &&
+    !(caze.internalTasks || []).some((task) => task.to === session.department),
   )
 
   return (
@@ -107,7 +108,7 @@ export default function StaffHome() {
                 <strong>{task.restrictedWellbeing ? 'Review academic support options' : task.title}</strong>
                 <div className="hint">{task.restrictedWellbeing ? 'Wellbeing support request · from Wellbeing Cell' : `${task.studentName} · from ${task.from}`}</div>
               </div>
-              <span className="hint">Supporting task · Open</span>
+              <span className="hint">Supporting task · {task.status === 'in-progress' ? 'In progress' : 'New'}</span>
               <span>Open task</span>
             </div>
           ))}

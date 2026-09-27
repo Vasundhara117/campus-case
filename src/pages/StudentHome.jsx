@@ -42,6 +42,12 @@ export default function StudentHome() {
                   {c.assignedCounselor ? ` · Counselor: ${c.assignedCounselor.name}` : ''}
                   {c.parentCaseReference ? ` · linked to ${c.parentCaseReference}` : ''}
                 </div>
+                {c.status === 'RESOLVED' && (
+                  <div className="hint" style={{ marginTop: 6 }}>
+                    Your support request has been reviewed. Your counselor has shared your next step with you.
+                    {c.studentUpdates?.length > 0 && ` Latest update: ${c.studentUpdates[c.studentUpdates.length - 1].message}`}
+                  </div>
+                )}
               </div>
               <StatusBadge status={c.status} student counselorAssigned={Boolean(c.assignedCounselor)} />
             </div>

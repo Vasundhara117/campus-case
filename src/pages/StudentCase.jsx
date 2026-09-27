@@ -23,7 +23,6 @@ export default function StudentCase() {
 
   const wellbeingCase = caze.assignedDepartment === 'Wellbeing Cell'
   const coordinating = caze.status === 'COORDINATION REQUIRED' || caze.internalTasks.some((task) => task.status === 'open')
-  const supportingDepartments = [...new Set(caze.internalTasks.map((task) => task.to))]
   const publicEvents = caze.timeline.filter((event) => event.visibility !== 'internal')
   const latestUpdate = [...publicEvents].sort((a, b) => new Date(b.at) - new Date(a.at))[0]
   const latestCounselorUpdate = [...(caze.studentUpdates || [])].sort((a, b) => new Date(b.at) - new Date(a.at))[0]
@@ -37,7 +36,7 @@ export default function StudentCase() {
       {coordinating && caze.status !== 'RESOLVED' && (
         <p className="callout" style={{ marginTop: 16 }}>
           {wellbeingCase
-            ? `Your support team is coordinating with ${supportingDepartments.join(', ') || 'another campus service'}. You do not need to visit another office or repeat your situation.`
+            ? 'Your support team is coordinating with another campus service. You do not need to visit another office or repeat your situation.'
             : 'Another university team is helping on this case. You do not need to visit another office.'}
         </p>
       )}
@@ -121,10 +120,7 @@ function studentNextAction(caze) {
       : 'Your support request has been received.'
   }
   if (status === 'IN PROGRESS') return 'Your wellbeing team has started working on your request.'
-  if (status === 'COORDINATION REQUIRED') {
-    const departments = [...new Set(caze.internalTasks.map((task) => task.to))]
-    return `Your support team is coordinating with ${departments.join(', ') || 'another campus service'}. You do not need to visit another office or repeat your situation.`
-  }
-  if (status === 'UNDER REVIEW') return 'Your support request has been reviewed.'
-  return 'Your support request has been coordinated and your next steps have been shared with you.'
+  if (status === 'COORDINATION REQUIRED') return 'Your support team is coordinating internally. You do not need to visit another office.'
+  if (status === 'UNDER REVIEW') return 'Your support request is under review. Your counselor will share the next step with you.'
+  return 'Your support request has been reviewed. Your counselor has shared your next step with you.'
 }

@@ -40,7 +40,7 @@ export const CATEGORY_ROUTING = {
 export const COUNSELORS = [
   { id: 'counselor-ananya-rao', name: 'Ananya Rao', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'AVAILABLE' },
   { id: 'counselor-rohan-mehta', name: 'Rohan Mehta', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'AVAILABLE' },
-  { id: 'counselor-priya-nair', name: 'Priya Nair', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'BUSY' },
+  { id: 'counselor-priya-nair', name: 'Priya Nair', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'OFFLINE' },
   { id: 'counselor-arjun-kumar', name: 'Arjun Kumar', role: 'Student Counselor', department: 'Wellbeing Cell', availability: 'OFFLINE' },
 ]
 
@@ -195,7 +195,7 @@ export function counselorWorkload(cases, counselors) {
       .map((caze) => caze.id),
     availability: cases.some((caze) =>
       caze.assignedCounselor?.id === counselor.id && ACTIVE_COUNSELOR_STATUSES.includes(caze.status),
-    ) ? 'BUSY' : counselor.availability,
+    ) ? 'BUSY' : counselor.availability === 'BUSY' ? 'OFFLINE' : counselor.availability,
   }))
 }
 

@@ -16,8 +16,8 @@ function briefFor(caze, openTasks) {
           : caze.triage?.suggestedNextAction || 'Assign the case to an available counselor for initial review.'
         : caze.status === 'COORDINATION REQUIRED'
           ? openTasks.length
-            ? 'Wait for Academic Support to report the appropriate next step.'
-            : 'Review the Academic Support result and move the request to under review.'
+            ? `Wait for ${openTasks[0].to} to report the requested next step.`
+            : 'Review the completed coordination result and move the request to under review.'
           : caze.status === 'UNDER REVIEW'
             ? 'Verify the next steps and share them with the student.'
             : caze.status === 'RESOLVED'
@@ -64,42 +64,45 @@ function SupportingWellbeingTask({ caze, task, ctx }) {
   const [completionNote, setCompletionNote] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
   const completed = task.status === 'done'
+  const started = task.status === 'in-progress'
   return (
     <div className="page">
       <p className="kicker"><Link to="/staff">Department queue</Link> · {caze.id} · Supporting access</p>
-      <h1 className="h1">Wellbeing support request</h1>
-      <p className="lede">Your department has been asked to provide a focused administrative support recommendation.</p>
+      <h1 className="h1">{task.to} coordination request</h1>
+      <p className="lede">Your department has been asked to complete this focused internal request.</p>
       <section className="card">
-        <p className="kicker">Support request</p>
-        <p>The student is experiencing academic difficulties and has requested coordinated support.</p>
-        <p className="kicker">Requested action</p>
-        <p>Review available academic support options and report the next step to the Wellbeing Cell.</p>
-        <p className="hint">Case {caze.id} · Requesting department: Wellbeing Cell</p>
+        <p className="kicker">Request</p>
+        <h2 className="section-title">{task.title}</h2>
+        {task.detail && <p>{task.detail}</p>}
+        <p className="hint">Case {caze.id} · Requesting department: {task.from}</p>
       </section>
       <section className="card" style={{ marginTop: 16 }}>
         <p className="kicker">Task status</p>
-        <h2 className="section-title">{completed ? 'Completed' : 'Pending'}</h2>
+        <h2 className="section-title">{completed ? 'Completed' : started ? 'In progress' : 'New request'}</h2>
         {completed && task.completionNote && <p><strong>Result:</strong> {task.completionNote}</p>}
         {completed && task.completedAt && <p className="hint">Completed {formatWhen(task.completedAt)}</p>}
-        {!completed && caze.status === 'COORDINATION REQUIRED' && (
-          <button className="btn teal" type="button" onClick={() => setModalOpen(true)}>Complete assigned task</button>
+        {!completed && caze.status !== 'RESOLVED' && (
+          <div className="actions">
+            {!started && <button className="btn secondary" type="button" onClick={() => ctx.startInternalTask(caze.id, task.id)}>Acknowledge / Start</button>}
+            <button className="btn teal" type="button" onClick={() => setModalOpen(true)}>Complete Request</button>
+          </div>
         )}
       </section>
       {modalOpen && (
         <Modal
-          title="Report the academic support next step"
+          title="Complete internal request"
           onClose={() => setModalOpen(false)}
           footer={<button className="btn" type="button" onClick={() => {
             if (ctx.completeTask(caze.id, task.id, completionNote)) {
               setModalOpen(false)
             }
-          }}>Send result to Wellbeing Cell</button>}
+          }}>Complete Request</button>}
         >
-          <label>Administrative support options reviewed<textarea value={completionNote} onChange={(event) => setCompletionNote(event.target.value)} /></label>
-          <p className="hint">Keep the update focused on administrative options. Do not include diagnosis or unnecessary personal details.</p>
+          <label>Result for the owning counselor<textarea value={completionNote} onChange={(event) => setCompletionNote(event.target.value)} /></label>
+          <p className="hint">Keep the result focused on the requested administrative support. Only the owning counselor receives it.</p>
         </Modal>
       )}
-      <p className="hint" style={{ marginTop: 16 }}>Supporting access cannot change the owning case status or resolve the student’s case.</p>
+      <p className="hint" style={{ marginTop: 16 }}>The case remains owned by {task.from}. Supporting departments cannot change or resolve the main case.</p>
     </div>
   )
 }
@@ -126,8 +129,8 @@ export default function StaffCase() {
   const journey = getJourneyCases(cases, caze)
   const root = journey.find((item) => item.id === (caze.parentCaseReference || caze.id))
   const tasks = journey.flatMap((item) => (item.internalTasks || []).map((task) => ({ ...task, caseId: item.id })))
-  const openTasks = tasks.filter((task) => task.status === 'open')
-  const pendingCurrentTasks = (caze.internalTasks || []).filter((task) => task.status === 'open')
+  const openTasks = tasks.filter((task) => task.status !== 'done')
+  const pendingCurrentTasks = (caze.internalTasks || []).filter((task) => task.status !== 'done')
   const isOwner = caze.assignedDepartment === session.department
   const isCounselingCase = caze.assignedDepartment === 'Wellbeing Cell'
   const isAssignedCounselor = !isCounselingCase || caze.assignedCounselor?.id === session.staffId
@@ -169,8 +172,8 @@ export default function StaffCase() {
     ? brief.suggestedDepartment
     : others[0]?.name || ''
   const assignedSupportTask = (caze.internalTasks || []).find((task) =>
-    task.to === session.department,
-  )
+    task.to === session.department && task.status !== 'done',
+  ) || (caze.internalTasks || []).find((task) => task.to === session.department)
 
   const close = () => {
     setModal(null)
@@ -194,17 +197,11 @@ export default function StaffCase() {
     setModal('coordinate')
   }
 
-  if (caze.assignedDepartment === 'Wellbeing Cell' &&
-      session.department === 'Academic Support' &&
-      !isOwner &&
-      assignedSupportTask) {
-    return (
-      <SupportingWellbeingTask
-        caze={caze}
-        task={assignedSupportTask}
-        ctx={ctx}
-      />
-    )
+  if (caze.assignedDepartment === 'Wellbeing Cell' && !isOwner) {
+    if (!assignedSupportTask) {
+      return <div className="page"><p>No coordination request has been assigned to your department.</p><Link to="/staff">Back to queue</Link></div>
+    }
+    return <SupportingWellbeingTask caze={caze} task={assignedSupportTask} ctx={ctx} />
   }
 
   return (
@@ -364,13 +361,16 @@ export default function StaffCase() {
             {tasks.length === 0 && <p className="hint">No coordination tasks have been created for this journey.</p>}
             {tasks.map((task) => (
               <article className="task-card" key={task.id}>
-                <div className="section-heading"><strong>{task.title}</strong><span className={`task-state ${task.status}`}>{task.status === 'open' ? 'Pending' : 'Completed'}</span></div>
+                <div className="section-heading"><strong>{task.title}</strong><span className={`task-state ${task.status}`}>{task.status === 'open' ? 'Pending' : task.status === 'in-progress' ? 'In progress' : 'Completed'}</span></div>
                 <p className="hint">{task.from} → {task.to} · Case {task.caseId}</p>
                 {task.detail && <p>{task.detail}</p>}
                 {task.completionNote && <p><strong>Result:</strong> {task.completionNote}</p>}
                 {task.completedAt && <p className="hint">Completed {formatWhen(task.completedAt)}</p>}
-                {task.status === 'open' && task.to === session.department && !isResolved && (
-                  <button className="btn teal" type="button" onClick={() => { setTaskToComplete(task); setText(''); setModal('complete') }}>Complete assigned task</button>
+                {task.status !== 'done' && task.to === session.department && !isResolved && (
+                  <div className="actions">
+                    {task.status === 'open' && <button className="btn secondary" type="button" onClick={() => ctx.startInternalTask(task.caseId, task.id)}>Acknowledge / Start</button>}
+                    <button className="btn teal" type="button" onClick={() => { setTaskToComplete(task); setText(''); setModal('complete') }}>Complete Request</button>
+                  </div>
                 )}
               </article>
             ))}
